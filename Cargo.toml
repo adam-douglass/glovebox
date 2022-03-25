@@ -1,0 +1,37 @@
+[package]
+name = "turbo-glovebox"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+log = "*"
+env_logger = "*"
+chrono = { version = "*", features = ["serde"] }
+tempdir = "0.3"
+futures = "*"
+bitmask-enum = "1"
+uuid = { version = "0.8", features = ["serde", "v4"] }
+rand = "*"
+confy = "0"
+platform-dirs = "0.3.0"
+
+tokio = { version = "1", features = ["full"] }
+
+hyper = { version = "0.14", features = ["full"] }
+hyper-tungstenite = "~0"
+routerify = "3"
+
+bincode = "1"
+serde = {version = "1", features = ["derive"]}
+serde_json = "1.0"
+serde_with = "1"
+serde_yaml = "0.8"
+
+flate2 = "1"
+
+[dev-dependencies]
+tokio-tungstenite = "*"
+futures-util = "*"
