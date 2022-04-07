@@ -1,0 +1,9 @@
+
+name: Test
+on: push
+jobs:
+  Test:
+    runs-on: ubuntu-latest
+    container: rust:1-buster
+    steps:
+      - run: cargo test
