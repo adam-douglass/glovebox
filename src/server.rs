@@ -407,8 +407,8 @@ mod test {
         let producer = SendMessages::new(port).total(10000).concurrent(100).start();
         let consumer = FetchMessages::new(port).limit(10000).concurrent(100).start();
 
-        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(60), producer).await.unwrap().unwrap().unwrap(), 10000);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(60), consumer).await.unwrap().unwrap().unwrap();
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(120), producer).await.unwrap().unwrap().unwrap(), 10000);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(120), consumer).await.unwrap().unwrap().unwrap();
         assert_eq!(result.finish, 10000);
         assert!(result.drops == 0);
 

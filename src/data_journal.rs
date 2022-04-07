@@ -35,13 +35,13 @@ pub struct DataJournal {
 
 pub async fn file_exists(path: &PathBuf) -> Result<bool, Error> {
     match tokio::fs::metadata(path).await {
-        Ok(_) => return Ok(true),
+        Ok(_) => Ok(true),
         Err(err) => if let std::io::ErrorKind::NotFound = err.kind() {
-            return Ok(false)
+            Ok(false)
         } else {
-            return Err(Error::from(err))
+            Err(Error::from(err))
         },
-    };
+    }
 }
 
 
