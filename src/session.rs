@@ -1,11 +1,11 @@
 use std::collections::{HashMap, VecDeque};
-use std::io::{Write, Read};
+// use std::io::{Write, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use flate2::Compression;
-use flate2::read::ZlibDecoder;
-use flate2::write::ZlibEncoder;
+// use flate2::Compression;
+// use flate2::read::ZlibDecoder;
+// use flate2::write::ZlibEncoder;
 use futures::{StreamExt, SinkExt};
 use hyper_tungstenite::tungstenite::Message;
 use hyper_tungstenite::{HyperWebsocket, WebSocketStream};
@@ -29,6 +29,8 @@ pub enum NotificationName {
     Sync,
     Assign,
     Finish,
+    Retry,
+    Drop
 }
 
 #[bitmask_enum::bitmask(u8)]
@@ -38,6 +40,8 @@ pub enum NotificationMask {
     Sync,
     Assign,
     Finish,
+    Retry,
+    Drop,
 }
 
 impl From<&NotificationName> for NotificationMask {
@@ -48,6 +52,8 @@ impl From<&NotificationName> for NotificationMask {
             NotificationName::Sync => NotificationMask::Sync,
             NotificationName::Assign => NotificationMask::Assign,
             NotificationName::Finish => NotificationMask::Finish,
+            NotificationName::Retry => NotificationMask::Retry,
+            NotificationName::Drop => NotificationMask::Drop,
         }
     }
 }
@@ -95,11 +101,18 @@ pub struct ClientFinish {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ClientPop {
-    queue: String,
-    sync: Firmness,
-    blocking: bool,
-    block_timeout: f32,
-    label: u64,
+    pub queue: String,
+    pub sync: Firmness,
+    pub blocking: bool,
+    pub block_timeout: f32,
+    pub label: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ClientCreate {
+    pub queue: String,
+    pub label: u64,
+    pub retries: u32
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -108,8 +121,32 @@ pub enum ClientRequest {
     Post(ClientPost),
     Fetch(ClientFetch),
     Finish(ClientFinish),
-    Pop(ClientPop)
+    Pop(ClientPop),
+    Create(ClientCreate),
 }
+
+impl ClientRequest {
+    pub fn label(&self) -> u64 {
+        match self {
+            ClientRequest::Post(post) => post.label,
+            ClientRequest::Fetch(fetch) => fetch.label,
+            ClientRequest::Finish(finish) => finish.label.unwrap_or(0),
+            ClientRequest::Pop(pop) => pop.label,
+            ClientRequest::Create(create) => create.label,
+        }
+    }
+
+    pub fn queue(&self) -> String {
+        match self {
+            ClientRequest::Post(post) => post.queue.clone(),
+            ClientRequest::Fetch(fetch) => fetch.queue.clone(),
+            ClientRequest::Finish(finish) => finish.queue.clone(),
+            ClientRequest::Pop(pop) => pop.queue.clone(),
+            ClientRequest::Create(create) => create.queue.clone()
+        }
+    }
+}
+
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ClientDelivery {
@@ -136,6 +173,18 @@ pub struct ClientNoMessage {
     pub label: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ErrorCode {
+    NoObject,
+    ObjectAlreadyExists
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ClientError {
+    pub label: u64,
+    pub code: ErrorCode,
+    pub key: String,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag="type")]
@@ -143,29 +192,37 @@ pub enum ClientResponse {
     Message(ClientDelivery),
     Notice(ClientNotice),
     Hello(ClientHello),
-    NoMessage(ClientNoMessage)
+    NoMessage(ClientNoMessage),
+    Error(ClientError),
 }
 
 impl TryFrom<ClientMessage> for ClientResponse {
     type Error = Error;
 
-    fn try_from(note: ClientMessage) -> Result<ClientResponse, Self::Error> {
+    // <ClientResponse as TryFrom<ClientMessage>>::
+    fn try_from(note: ClientMessage) -> Result<ClientResponse, Error> {
         Ok(match note.notice {
             ClientMessageType::Ready => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Ready }),
             ClientMessageType::Write => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Write }),
             ClientMessageType::Sync => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Sync }),
             ClientMessageType::Assign => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Assign }),
             ClientMessageType::Finish => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Finish }),
+            ClientMessageType::Retry => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Retry }),
+            ClientMessageType::Drop => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Drop }),
             ClientMessageType::SendEntry(entry, finished) => {
-                let mut decoder = ZlibDecoder::new(&entry.body[..]);
-                let mut output = vec![];
-                decoder.read_to_end(&mut output)?;
+                let body = match std::sync::Arc::try_unwrap(entry.body) {
+                    Ok(body) => body,
+                    Err(err) => err.as_ref().clone(),
+                };
+                // let mut decoder = ZlibDecoder::new(&entry.body[..]);
+                // let mut output = vec![];
+                // decoder.read_to_end(&mut output)?;
 
                 ClientResponse::Message(ClientDelivery {
                     label: note.label,
                     shard: entry.header.shard,
                     sequence: entry.header.sequence.0,
-                    body: output,
+                    body: body,
                     finished,
                 })
             },
@@ -213,6 +270,7 @@ enum SessionMessage {
     GetConnection(ClientId, oneshot::Sender<mpsc::Sender<SocketMessage>>),
     Stop,
     GetQueueStatus(String, oneshot::Sender<QueueStatusResponse>),
+    CreateQueue(ClientId, ClientCreate)
 }
 
 #[derive(Clone)]
@@ -258,6 +316,7 @@ impl SessionClient {
                 shard: 0,
                 length: post.message.len() as u32,
                 location: 0,
+                attempts: 0,
                 priority: post.priority,
                 sequence: SequenceNo(0),
                 notice: NoticeRequest {
@@ -303,6 +362,11 @@ impl SessionClient {
         })).await?)
     }
 
+    pub async fn create(&mut self, client: ClientId, pop: ClientCreate) -> Result<(), Error> {
+        self.connection.send(SessionMessage::CreateQueue(client, pop)).await?;
+        return Ok(())
+    }
+
     pub async fn send_client(&mut self, message: crate::priority::ClientMessage) -> Result<Option<crate::priority::ClientMessage>, Error> {
         let socket = self.fetch_client(message.client).await?;
         match socket.send(SocketMessage::OutgoingMessage(message)).await {
@@ -326,6 +390,7 @@ type Socket = WebSocketStream<hyper::upgrade::Upgraded>;
 enum SocketMessage {
     ResetConnection(Socket),
     OutgoingMessage(ClientMessage),
+    PreparedMessage(ClientResponse),
     Stop
 }
 
@@ -462,23 +527,41 @@ impl Session {
                 return Ok(true)
             },
             SessionMessage::GetQueue(name, response) => {
-                match self.queues.entry(name) {
-                    std::collections::hash_map::Entry::Occupied(entry) => {
-                        let _ = response.send(entry.get().clone());
-                    },
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        let session_client = SessionClient{
-                            config: self.config.clone(),
-                            connection: self.command_sink.clone(),
-                            queue_cache: Default::default(),
-                            client_cache: Default::default(),
-                        };
-                        let (_, client) = create_queue(&self.config.data_path, entry.key(), session_client).await?;
-                        entry.insert(client.clone());
-                        let _ = response.send(client);
-                    },
+                if let Some(sock) = self.queues.get(&name) {
+                    let _ = response.send(sock.clone());
                 }
             },
+            SessionMessage::CreateQueue(client, create) => {
+                // Check if the name is already used
+                if self.queues.contains_key(&create.queue) {
+                    if let Some((con, _)) = self.connections.get(&client) {
+                        let _ = con.send(SocketMessage::PreparedMessage(ClientResponse::Error(ClientError{
+                            label: create.label,
+                            code: ErrorCode::ObjectAlreadyExists,
+                            key: create.queue,
+                        }))).await;
+                    }
+                } else {
+                    // Create the queue
+                    let session_client = SessionClient{
+                        config: self.config.clone(),
+                        connection: self.command_sink.clone(),
+                        queue_cache: Default::default(),
+                        client_cache: Default::default(),
+                    };
+
+                    let (_, client_con) = create_queue(&self.config.data_path, &create.queue, session_client, create.retries).await?;
+                    self.queues.insert(create.queue, client_con);
+
+                    // Notify the requester
+                    if let Some((con, _)) = self.connections.get(&client) {
+                        let _ = con.send(SocketMessage::PreparedMessage(ClientResponse::Notice(ClientNotice {
+                            label: create.label,
+                            notice: NotificationName::Ready,
+                        }))).await;
+                    }
+                }
+            }
             SessionMessage::GetConnection(id, response) => {
                 match self.connections.entry(id) {
                     std::collections::hash_map::Entry::Occupied(entry) => {
@@ -579,7 +662,7 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                 None => break,
             };
 
-            match message {
+            let message = match message {
                 SocketMessage::Stop => break,
                 SocketMessage::ResetConnection(new) => {
                     socket = new;
@@ -591,20 +674,26 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                             buffer.push_front(message);
                             break;
                         }
-                    }
+                    };
+                    continue
                 },
                 SocketMessage::OutgoingMessage(message) => {
-                    let message = match ClientResponse::try_from(message){
+                    match ClientResponse::try_from(message){
                         Ok(message) => message,
-                        Err(err) => { error!("Send Encode Error: {err}"); continue },
-                    };
-                    let message = Message::Text(match serde_json::to_string(&message) {
-                        Ok(message) => message,
-                        Err(err) => { error!("Send Error: {err}"); continue },
-                    });
-                    buffer.push_back(message);
+                        Err(err) => { error!("Send Encode Error: {err}"); continue; },
+                    }
                 },
-            }
+                SocketMessage::PreparedMessage(message) => {
+                    message
+                }
+            };
+
+            let message = Message::Text(match serde_json::to_string(&message) {
+                Ok(message) => message,
+                Err(err) => { error!("Send Error: {err}"); continue },
+            });
+            buffer.push_back(message);
+
         } else {
             tokio::select!{
                 message = recv.recv() => {
@@ -613,25 +702,29 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                         None => break,
                     };
 
-                    match message {
+                    let message = match message {
                         SocketMessage::Stop => break,
-                        SocketMessage::ResetConnection(new) => socket = new,
+                        SocketMessage::ResetConnection(new) => { socket = new; continue },
                         SocketMessage::OutgoingMessage(message) => {
-                            let message = match ClientResponse::try_from(message){
+                            match ClientResponse::try_from(message){
                                 Ok(message) => message,
                                 Err(err) => { error!("Send Encode Error: {err}"); continue },
-                            };
-                            let message = Message::Text(match serde_json::to_string(&message) {
-                                Ok(message) => message,
-                                Err(err) => { error!("Send Error: {err}"); continue },
-                            });
-
-                            if let Err(_) = socket.send(message.clone()).await {
-                                socket_spoiled = true;
-                                buffer.push_back(message);
                             }
                         },
+                        SocketMessage::PreparedMessage(message) => {
+                            message
+                        }
                     };
+
+                    let message = Message::Text(match serde_json::to_string(&message) {
+                        Ok(message) => message,
+                        Err(err) => { error!("Send Error: {err}"); continue },
+                    });
+
+                    if let Err(_) = socket.send(message.clone()).await {
+                        socket_spoiled = true;
+                        buffer.push_back(message);
+                    }
                 },
 
                 message = socket.next() => {
@@ -667,28 +760,46 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                     };
 
                     debug!("Handling client message for {client_id} {message:?}");
+                    let label = message.label();
+                    let key = message.queue();
                     let result = match message {
-                        ClientRequest::Post(mut post) => {
-                            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(client.config.compression));
-                            if let Err(_) = encoder.write_all(&post.message) {
-                                continue
-                            }
-                            post.message = match encoder.finish() {
-                                Ok(message) => message,
-                                Err(_) => continue,
-                            };
-                            
-
+                        ClientRequest::Post(post) => {
+                            // let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(client.config.compression));
+                            // if let Err(_) = encoder.write_all(&post.message) {
+                            //     continue
+                            // }
+                            // post.message = match encoder.finish() {
+                            //     Ok(message) => message,
+                            //     Err(_) => continue,
+                            // };
                     
                             client.post(client_id, post).await
                         },
                         ClientRequest::Fetch(fetch) => client.fetch(client_id, fetch).await,
                         ClientRequest::Finish(finish) => client.finish(client_id, finish).await,
                         ClientRequest::Pop(pop) => client.pop(client_id, pop).await,
+                        ClientRequest::Create(create) => client.create(client_id, create).await,
                     };
 
                     if let Err(err) = result {
                         error!("{err:?}");
+
+                        let message = ClientResponse::Error(ClientError{ 
+                            label, 
+                            code: ErrorCode::NoObject, 
+                            key
+                        });
+
+                        let message = Message::Text(match serde_json::to_string(&message) {
+                            Ok(message) => message,
+                            Err(err) => { error!("Send Error: {err}"); continue },
+                        });
+
+                        if let Err(_) = socket.send(message.clone()).await {
+                            socket_spoiled = true;
+                            buffer.push_back(message);
+                        }
+
                     }
                 }
             }

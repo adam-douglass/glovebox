@@ -9,6 +9,8 @@ pub enum ClientMessageType {
     Sync,
     Assign,
     Finish,
+    Retry,
+    Drop,
     SendEntry(self::entry::Entry, bool),
     NoEntry,
 }

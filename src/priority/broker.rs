@@ -2,7 +2,7 @@ use std::collections::{HashMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use futures::future::join_all;
-use log::{info, error};
+use log::{info, error, debug};
 use rand::Rng;
 use serde::{Serialize, Deserialize};
 use tokio::sync::{mpsc, oneshot};
@@ -64,6 +64,7 @@ type PriorityQueue = mpsc::Sender<QueueCommand>;
 #[derive(Serialize, Deserialize)]
 struct QueueHeaderFile {
     name: String,
+    retries: u32
 }
 
 #[derive(Serialize, Deserialize)]
@@ -79,7 +80,7 @@ impl QueueHeaderFileData {
     }
 }
 
-pub async fn create_queue(path: &PathBuf, name: &String, client: SessionClient) -> Result<(String, PriorityQueue), Error> {
+pub async fn create_queue(path: &PathBuf, name: &String, client: SessionClient, retries: u32) -> Result<(String, PriorityQueue), Error> {
     let id = uuid::Uuid::new_v4().to_string();
     let path = path.join(&id);
     tokio::fs::DirBuilder::new()
@@ -88,6 +89,7 @@ pub async fn create_queue(path: &PathBuf, name: &String, client: SessionClient) 
         .await?;
     tokio::fs::write(path.join("header"), bincode::serialize(&QueueHeaderFileData::V0(QueueHeaderFile {
         name: name.clone(),
+        retries
     }))?).await?;
     info!("Creating queue: {name} for {id}");
     return open_queue(path, client).await
@@ -111,6 +113,7 @@ pub async fn open_queue(path: PathBuf, client: SessionClient) -> Result<(String,
         commands: command_source,
         pending_requests: Default::default(),
         shards_finished: 0,
+        retry_limit: header.retries,
     };
     tokio::spawn(internal.run());
 
@@ -157,6 +160,7 @@ struct PriorityQueueInternal {
     sequence_counter: u64,
     shards_finished: u64,
     path: PathBuf,
+    retry_limit: u32
 }
 
 impl PriorityQueueInternal {
@@ -173,7 +177,7 @@ impl PriorityQueueInternal {
             let parts: Vec<&str> = name.split("_").collect();
             if parts.len() == 2 && parts[1] == "meta" {
                 if let Ok(id) = parts[0].parse::<u32>() {
-                    loading.push(Shard::open(self.session.clone(), self.command_sink.clone(),self.path.clone(), id));
+                    loading.push(Shard::open(self.session.clone(), self.command_sink.clone(),self.path.clone(), id, self.retry_limit));
                 }
             }
         }
@@ -271,7 +275,11 @@ impl PriorityQueueInternal {
                         self.failed_fetch(pop.client, pop.label).await;
                         continue 
                     }
-                    return self.do_direct_pop(pop, entry).await
+                    entry = if let Some(entry) = self.do_direct_pop(&pop, entry).await? {
+                        entry
+                    } else {
+                        return Ok(())
+                    };
                 },
                 PendingRequest::Assign(assign, start) => {
                     if start.elapsed().as_secs_f32() > assign.block_timeout { 
@@ -354,7 +362,7 @@ impl PriorityQueueInternal {
                     }
                     if let Some(shard) = self.get_shard(reinsert.shard) {
                         shard.pop(pop, reinsert).await?;
-                    } 
+                    }
                     return Ok(())
                 },
                 PendingRequest::Assign(assign, start) => {
@@ -465,20 +473,36 @@ impl PriorityQueueInternal {
         return Ok(())
     }
 
-    async fn do_direct_pop(&mut self, pop: PopParams, entry: Entry) -> Result<(), Error> {
+    async fn do_direct_pop(&mut self, pop: &PopParams, entry: Entry) -> Result<Option<Entry>, Error> {
+        let notice = entry.header.notice;
+        debug!("Direct pop {}", notice.label);
+
+        // Try to send the client the message
         let sent = self.session.send_client(ClientMessage {
             client: pop.client,
             label: pop.label,
             notice: ClientMessageType::SendEntry(entry, true),
         }).await?;
 
+        // If sending it failed, send it back
         if let Some(message) = sent {
             if let ClientMessageType::SendEntry(entry, _) = message.notice {
-                self.command_sink.send(QueueCommand::Insert(entry)).await?
+                return Ok(Some(entry))
             }
+        } 
+
+        // It was sent OK, notify client
+        if notice.notices.contains(NotificationMask::Finish) || notice.notices.contains(NotificationMask::Ready) {
+            debug!("Direct pop {} notification", notice.label);
+            let _ = self.session.send_client(ClientMessage{
+                client: notice.client,
+                label: notice.label,
+                notice: ClientMessageType::Finish,
+            }).await;
+
         }
 
-        return Ok(())
+        return Ok(None)
     }
 
     fn get_shard<'a>(&'a self, id: u32) -> Option<&'a Shard> {
@@ -498,7 +522,7 @@ impl PriorityQueueInternal {
                 continue;
             }
 
-            let (shard, _) = Shard::open(self.session.clone(), self.command_sink.clone(), self.path.clone(), id).await?;
+            let (shard, _) = Shard::open(self.session.clone(), self.command_sink.clone(), self.path.clone(), id, self.retry_limit).await?;
 
             self.rw_shards.insert(id, shard);
             return Ok(self.rw_shards.get_mut(&id).unwrap())

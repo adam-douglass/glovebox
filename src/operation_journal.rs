@@ -141,22 +141,6 @@ impl<'a, Event: Serialize + DeserializeOwned> OperationJournal<Event> {
         Ok(self.journal.sync_all().await?)
     }
 
-    // pub async fn sync_task(&mut self, guard: oneshot::Sender<Error>) {
-    //     let cursor = self.journal.try_clone().await;
-    //     tokio::spawn(async move {
-    //         let cursor = match cursor {
-    //             Ok(cursor) => cursor,
-    //             Err(err) => {
-    //                 let _ = guard.send(Error::from(err));
-    //                 return;
-    //             }
-    //         };
-    //         if let Err(err) = cursor.sync_all().await {
-    //             let _ = guard.send(Error::from(err));
-    //         }
-    //     });
-    // }
-
     pub async fn truncate(&mut self, size: u64) -> Result<(), Error> {
         Ok(self.journal.set_len(size).await?)
     }

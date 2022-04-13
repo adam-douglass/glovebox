@@ -58,7 +58,8 @@ mod mask_encoding {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Assignment {
     pub expiry: chrono::DateTime<chrono::Utc>,
-    pub client: ClientId
+    pub client: ClientId,
+    pub notice: NoticeRequest
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -67,6 +68,7 @@ pub struct EntryHeader {
     pub length: u32,
     pub location: u64,
     pub priority: u32,
+    pub attempts: u32,
     pub sequence: SequenceNo,
     pub notice: NoticeRequest,
 }

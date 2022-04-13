@@ -44,7 +44,7 @@ impl Shard {
         return Ok(false)
     }
 
-    pub async fn open(client: SessionClient, queue_connection: mpsc::Sender<QueueCommand>, path: PathBuf, id: u32) -> Result<(Self, Vec<EntryPrefix>), Error> {
+    pub async fn open(client: SessionClient, queue_connection: mpsc::Sender<QueueCommand>, path: PathBuf, id: u32, retry_limit: u32) -> Result<(Self, Vec<EntryPrefix>), Error> {
         let (connection, recv) = mpsc::channel(32);
         let data_journal = DataJournal::open(&path, id).await?;
         let meta_journal = OperationJournal::open(&path, id).await?;
@@ -67,7 +67,8 @@ impl Shard {
             data_cursor,
             queue_connection,
             entry_limit,
-            inserted_entries: 0
+            inserted_entries: 0,
+            retry_limit
         };
 
         let raw_operations = internal.meta_journal.read_all().await?;
@@ -228,6 +229,7 @@ struct ShardInternal {
     entries: HashMap<SequenceNo, EntryHeader>,
     assignments: HashMap<SequenceNo, (EntryHeader, Assignment)>,
     timeouts: BinaryHeap<TimeoutSlot>,
+    retry_limit: u32,
 
     queue_connection: mpsc::Sender<QueueCommand>,
     connection: mpsc::Receiver<ShardCommand>,
@@ -239,8 +241,16 @@ unsafe impl Send for ShardInternal {}
 impl ShardInternal {
     async fn run(mut self) -> Result<(), Error> {
         loop {
+            let mut next_timeout = self.process_timeouts().await;
 
-            let next_timeout = self.process_timeouts().await;
+            if self.pending_messages.len() > 0 || self.syncing_messages.len() > 0 {
+                if !self.sync_task_running().await {
+                    self.cycle_sync().await;
+                    debug!("Timer based message sync");
+                } else {
+                    next_timeout = tokio::time::Instant::now().add(tokio::time::Duration::from_millis(250));
+                }
+            }
 
             tokio::select!{
                 message = self.connection.recv() => {
@@ -293,13 +303,25 @@ impl ShardInternal {
 
     async fn do_reinsert(&mut self, sequence: SequenceNo, priority: u32, assignment: Assignment) -> Result<(), Error> {
         let change = EntryChange::AssignTimeout(assignment.client, sequence, assignment.expiry);
-        self.apply(&change);
+        let result = self.apply(&change);
         self.meta_journal.append(&change).await?;
-        self.queue_connection.send(QueueCommand::ReInsert(EntryPrefix{ 
-            priority, 
-            sequence, 
-            shard: self.id 
-        })).await?;
+
+        debug!("retry message {:?}.", sequence);
+
+        if let Some(result) = result {
+            debug!("dropping message {:?} after {} retries.", result.sequence, result.attempts);
+            self.sync_events(vec![
+                ClientMessage{ client: assignment.notice.client, label: assignment.notice.label, notice: ClientMessageType::Retry},
+                ClientMessage{ client: assignment.notice.client, label: assignment.notice.label, notice: ClientMessageType::Drop},
+            ]).await;
+        } else {
+            self.sync_event(ClientMessage{ client: assignment.notice.client, label: assignment.notice.label, notice: ClientMessageType::Retry}).await;
+            self.queue_connection.send(QueueCommand::ReInsert(EntryPrefix{ 
+                priority, 
+                sequence, 
+                shard: self.id 
+            })).await?;
+        }
         return Ok(())
     }
 
@@ -469,8 +491,11 @@ impl ShardInternal {
         }
 
         if notice.notices.contains(NotificationMask::Finish) {
+            debug!("Pop finish notice for {} {}", notice.client, notice.label);
             self.sync_event(ClientMessage { client: notice.client, label: notice.label, notice: ClientMessageType::Finish }).await;
-        };
+        } else {
+            debug!("Pop finish no notice");
+        }
 
         return Ok(())
     }
@@ -484,13 +509,14 @@ impl ShardInternal {
                 None
             },
             EntryChange::Assign(client, sequence, timeout) => {
-                let entry = match self.entries.remove(sequence) {
+                let mut entry = match self.entries.remove(sequence) {
                     Some(entry) => entry,
                     None => return None,
                 };
+                entry.attempts += 1;
                 self.assignments.insert(*sequence, (
                     entry.clone(),
-                    Assignment{ expiry: *timeout, client: *client }
+                    Assignment{ expiry: *timeout, client: *client, notice: entry.notice }
                 ));
                 self.timeouts.push(TimeoutSlot{
                     expiry: *timeout,
@@ -516,8 +542,8 @@ impl ShardInternal {
                 }
             },
             EntryChange::Pop(sequence) => {
-                match self.assignments.remove(sequence) {
-                    Some(value) => Some(value.0),
+                match self.entries.remove(sequence) {
+                    Some(value) => Some(value),
                     None => None,
                 }
             },
@@ -535,7 +561,11 @@ impl ShardInternal {
                 };
 
                 if let Some((entry, _)) = entry {
-                    self.entries.insert(entry.sequence, entry);
+                    if entry.attempts >= self.retry_limit {
+                        return Some(entry);
+                    } else {
+                        self.entries.insert(entry.sequence, entry);
+                    }
                 }
 
                 None
@@ -543,10 +573,8 @@ impl ShardInternal {
         }
     }
 
-    async fn sync_event(&mut self, event: ClientMessage) {
-        self.pending_messages.push(event);
-
-        let running = match self.sync_task.try_recv() {
+    async fn sync_task_running(&mut self) -> bool {
+        match self.sync_task.try_recv() {
             Ok(err) => {
                 error!("{err:?}");
                 // Send error notices here
@@ -556,45 +584,64 @@ impl ShardInternal {
                 oneshot::error::TryRecvError::Empty => true,
                 oneshot::error::TryRecvError::Closed => false,
             },
+        }
+    }
+
+    async fn cycle_sync(&mut self) {
+        loop {
+            match self.syncing_messages.pop() {
+                Some(message) => {let _ = self.client.send_client(message).await;},
+                None => break,
+            }
+        }
+        std::mem::swap(&mut self.syncing_messages, &mut self.pending_messages);
+        let (guard, recv) = oneshot::channel();
+        self.sync_task = recv;
+
+        let m = match self.meta_journal.journal.try_clone().await {
+            Ok(m) => m,
+            Err(err) => {
+                error!("{err:?}");
+                return
+            },
+        };
+        let j = match self.data_journal.journal.try_clone().await {
+            Ok(j) => j,
+            Err(err) => {
+                error!("{err:?}");
+                return
+            },
         };
 
-        if !running {
-            loop {
-                match self.syncing_messages.pop() {
-                    Some(message) => {let _ = self.client.send_client(message).await;},
-                    None => break,
-                }
+        debug!("Start sync job with {} messages", self.syncing_messages.len());
+        tokio::spawn(async move {
+            let (m, j) = tokio::join!(m.sync_data(), j.sync_data());
+            if let Err(err) = m {
+                let _ = guard.send(Error::from(err));
+                return
             }
-            std::mem::swap(&mut self.syncing_messages, &mut self.pending_messages);
-            let (guard, recv) = oneshot::channel();
-            self.sync_task = recv;
+            if let Err(err) = j {
+                let _ = guard.send(Error::from(err));
+            }
+        });
+    }
 
-            let m = match self.meta_journal.journal.try_clone().await {
-                Ok(m) => m,
-                Err(err) => {
-                    error!("{err:?}");
-                    return
-                },
-            };
-            let j = match self.data_journal.journal.try_clone().await {
-                Ok(j) => j,
-                Err(err) => {
-                    error!("{err:?}");
-                    return
-                },
-            };
+    async fn sync_events(&mut self, mut events: Vec<ClientMessage>) {
+        let last = events.pop();
+        for item in events {
+            self.pending_messages.push(item);
+        }
+        if let Some(last) = last {
+            self.sync_event(last).await;
+        }
+    }
 
-            tokio::spawn(async move {
-                let (m, j) = tokio::join!(m.sync_data(), j.sync_data());
-                if let Err(err) = m {
-                    let _ = guard.send(Error::from(err));
-                    return
-                }
-                if let Err(err) = j {
-                    let _ = guard.send(Error::from(err));
-                    return
-                }
-            });
+    async fn sync_event(&mut self, event: ClientMessage) {
+        self.pending_messages.push(event);
+        if !self.sync_task_running().await {
+            self.cycle_sync().await
+        } else {
+            debug!("Sync message buffered.");
         }
     }
 
@@ -626,7 +673,6 @@ impl ShardInternal {
     async fn process_timeouts(&mut self) -> tokio::time::Instant {
         loop {
             {
-
                 let exp = match self.timeouts.peek() {
                     Some(next) => next,
                     None => break,

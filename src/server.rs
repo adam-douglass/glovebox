@@ -156,7 +156,7 @@ mod test {
     use crate::error::Error;
     use crate::priority::broker::QueueStatus;
     use crate::priority::entry::Firmness;
-    use crate::session::{Session, Configuration, ClientRequest, ClientPost, ClientResponse, ClientFetch, ClientFinish, NotificationName, SessionClient};
+    use crate::session::{Session, Configuration, ClientRequest, ClientPost, ClientResponse, ClientFetch, ClientFinish, NotificationName, SessionClient, ClientCreate};
 
     struct SendMessages {
         port: u16,
@@ -291,7 +291,7 @@ mod test {
             while outstanding.len() < concurrent as usize {
                 ii += 1;
                 outstanding.insert(ii);
-                let outgoing_message = ClientRequest::Fetch(ClientFetch{queue: queue.clone(), label:ii,sync:Firmness::Write, blocking: true, work_timeout: 0.5, block_timeout: 2.0 });
+                let outgoing_message = ClientRequest::Fetch(ClientFetch{queue: queue.clone(), label:ii,sync:Firmness::Write, blocking: true, work_timeout: 0.5, block_timeout: 30.0 });
                 fetch_count += 1;
                 ws.send(Message::Text(serde_json::to_string(&outgoing_message)?)).await.unwrap();
             }
@@ -337,6 +337,10 @@ mod test {
     }
 
     async fn setup(path: PathBuf, port: u16) -> SessionClient {
+        return setup_retries(path, port, 1000).await
+    }
+
+    async fn setup_retries(path: PathBuf, port: u16, retries: u32) -> SessionClient {
         let mut session = Session::open(Configuration {
             data_path: path,
             bind_address: "127.0.0.1".to_string(),
@@ -350,7 +354,18 @@ mod test {
                 error!("{err:?}");
             }
         });
-        client
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await.unwrap();
+        let outgoing_message = ClientRequest::Create(ClientCreate{
+            queue: String::from("test_queue"), 
+            retries: retries,
+            label: 0,
+        });
+        ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+
+        return client;
     }
 
     #[tokio::test]
@@ -359,9 +374,7 @@ mod test {
         let _ = env_logger::builder().is_test(true).try_init();
         let port = 4000;
         let temp = TempDir::new("simple_exchange").unwrap();
-        let client = setup(temp.path().to_path_buf(), port).await;
-
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let client = setup(temp.path().to_path_buf(), port,).await;
 
         let producer = SendMessages::new(port).start();
         let consumer = FetchMessages::new(port).start();
@@ -379,8 +392,6 @@ mod test {
         let port = 4010;
         let temp = TempDir::new("simple_exchange").unwrap();
         let client = setup(temp.path().to_path_buf(), port).await;
-
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         let producer = SendMessages::new(port).start();
         let consumer = FetchMessages::new(port).drop(0.5).start();
@@ -402,13 +413,18 @@ mod test {
         let temp = TempDir::new("simple_exchange").unwrap();
         let client = setup(temp.path().to_path_buf(), port).await;
 
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
         let producer = SendMessages::new(port).total(10000).concurrent(100).start();
         let consumer = FetchMessages::new(port).limit(10000).concurrent(100).start();
 
-        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(120), producer).await.unwrap().unwrap().unwrap(), 10000);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(120), consumer).await.unwrap().unwrap().unwrap();
+        let mut timeout = std::time::Duration::from_secs(60);
+        for (key, value) in std::env::vars() {
+            if key == "CI" && value == "true" {
+                timeout = std::time::Duration::from_secs(600);
+            }
+        }
+
+        assert_eq!(tokio::time::timeout(timeout, producer).await.unwrap().unwrap().unwrap(), 10000);
+        let result = tokio::time::timeout(timeout, consumer).await.unwrap().unwrap().unwrap();
         assert_eq!(result.finish, 10000);
         assert!(result.drops == 0);
 
@@ -430,7 +446,6 @@ mod test {
         let _ = env_logger::builder().is_test(true).try_init();
         let temp = TempDir::new("simple_exchange").unwrap();
         let client = setup(temp.path().to_path_buf(), port).await;
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         let producer = SendMessages::new(port).start();
         assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), producer).await.unwrap().unwrap().unwrap(), 100);
@@ -450,7 +465,6 @@ mod test {
 
         {
             let client = setup(temp.path().to_path_buf(), port).await;
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
             let producer = SendMessages::new(port).start();
             assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), producer).await.unwrap().unwrap().unwrap(), 100);
@@ -459,12 +473,89 @@ mod test {
 
         {
             let client = setup(temp.path().to_path_buf(), port).await;
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
             let consumer = FetchMessages::new(port).start();
             assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), consumer).await.unwrap().unwrap().unwrap().fetched, 100);
             client.stop().await.unwrap();
         }
 
+    }
+
+    #[tokio::test]
+    async fn test_retries() {
+        // Launch the server
+        let port = 4003;
+        let _ = env_logger::builder().is_test(true).try_init();
+        let temp = TempDir::new("simple_exchange").unwrap();
+
+        let client = setup_retries(temp.path().to_path_buf(), port, 3).await;
+        let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await.unwrap();
+        if let Message::Text(body) = ws.next().await.unwrap().unwrap() {
+            let hello: ClientResponse = serde_json::from_str(&body).unwrap();
+            if let ClientResponse::Hello(client) = hello {
+                info!("test connected as {}", client.id);
+            }
+        }
+
+        // Send a message
+        let label = 5;
+        let outgoing_message = ClientRequest::Post(ClientPost{
+            queue: "test_queue".to_owned(),
+            message: b"TEST MESSAGE".to_vec(),
+            priority: 1,
+            label,
+            notify: vec![NotificationName::Retry, NotificationName::Drop]
+        });
+        ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+
+        // Fetch three times
+        for _ in 0..3 {
+            let outgoing_message = ClientRequest::Fetch(ClientFetch{
+                queue: "test_queue".to_owned(), 
+                label: 9,
+                sync: Firmness::Write, 
+                blocking: true, 
+                work_timeout: 0.1, 
+                block_timeout: 5.0 
+            });
+            ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+        }
+        
+        // Wait for failure message
+        let mut retries = 0;
+        let mut drops = 0;
+        loop {
+            let message = match tokio::time::timeout(std::time::Duration::from_secs(30), ws.next()).await {
+                Ok(message) => message.unwrap().unwrap(),
+                Err(_) => break,
+            };
+            if let Message::Text(body) = message {
+                let confirm: ClientResponse = serde_json::from_str(&body).unwrap();
+                match confirm {
+                    ClientResponse::Notice(note)=>{
+                        assert_eq!(note.label, label);
+                        if note.notice == NotificationName::Retry {
+                            info!("retry notice");
+                            retries += 1;
+                        } else if note.notice == NotificationName::Drop {
+                            info!("drop notice");
+                            drops += 1;
+                        } else {
+                            assert!(false);
+                        }
+                    }
+                    ClientResponse::Message(_) => {
+                        info!("drop message, we want server to retry");
+                    },
+                    ClientResponse::Hello(_) => todo!("hello"),
+                    ClientResponse::NoMessage(_) => todo!(),
+                    ClientResponse::Error(_) => todo!(), 
+                }
+            }
+        }
+        assert_eq!(retries, 3);
+        assert_eq!(drops, 1);
+        
+        client.stop().await.unwrap()
     }
 }
