@@ -21,9 +21,11 @@ pub struct Shard {
     pub id: u32,
     max_priority: u32,
     min_priority: u32,
-    inserted_items: u32,
+    inserted_items: u64,
+    inserted_bytes: u64,
     connection: mpsc::Sender<ShardCommand>,
-    entry_limit: u32
+    entry_limit: u64,
+    size_limit: u64,
 }
 
 enum ProcessExitCode {
@@ -44,13 +46,12 @@ impl Shard {
         return Ok(false)
     }
 
-    pub async fn open(client: SessionClient, queue_connection: mpsc::Sender<QueueCommand>, path: PathBuf, id: u32, retry_limit: u32) -> Result<(Self, Vec<EntryPrefix>), Error> {
+    pub async fn open(client: SessionClient, queue_connection: mpsc::Sender<QueueCommand>, path: PathBuf, id: u32, retry_limit: u32, max_bytes: u64, max_entries: u64) -> Result<(Self, Vec<EntryPrefix>), Error> {
         let (connection, recv) = mpsc::channel(32);
         let data_journal = DataJournal::open(&path, id).await?;
         let meta_journal = OperationJournal::open(&path, id).await?;
 
         let data_cursor = data_journal.header_size;
-        let entry_limit = 8000;
 
         let mut internal = ShardInternal {
             id,
@@ -66,9 +67,11 @@ impl Shard {
             client,
             data_cursor,
             queue_connection,
-            entry_limit,
+            entry_limit: max_entries,
+            size_limit: max_bytes,
             inserted_entries: 0,
-            retry_limit
+            inserted_bytes: 0,
+            retry_limit,
         };
 
         let raw_operations = internal.meta_journal.read_all().await?;
@@ -76,6 +79,7 @@ impl Shard {
         // let mut last_location: Option<u64> = None;
         let mut max_sequence: u64 = 0;
         let mut inserted_items = 0;
+        let mut inserted_bytes: u64 = 0;
         let mut operations = vec![];
         for (location, operation) in raw_operations {
             internal.apply(&operation);
@@ -86,6 +90,7 @@ impl Shard {
                     break
                 }
                 inserted_items += 1;
+                inserted_bytes += entry.length as u64;
                 // last_location = Some(match last_location {
                 //     Some(value) => value.max(entry.location),
                 //     None => entry.location,
@@ -127,7 +132,9 @@ impl Shard {
 
             connection,
             inserted_items,
-            entry_limit,
+            inserted_bytes,
+            entry_limit: max_entries,
+            size_limit: max_bytes,
         };
 
         return Ok((shard, active))
@@ -135,7 +142,7 @@ impl Shard {
 
 
     pub fn can_insert(&self) -> bool {
-        self.inserted_items < self.entry_limit
+        self.inserted_items < self.entry_limit && self.inserted_bytes < self.size_limit
     }
 
     pub fn priority_fit(&self, priority: u32) -> i32 {
@@ -152,6 +159,7 @@ impl Shard {
         self.min_priority = self.min_priority.min(entry.header.priority);
         self.max_priority = self.max_priority.max(entry.header.priority);
         self.inserted_items += 1;
+        self.inserted_bytes += entry.body.len() as u64;
         Ok(self.connection.send(ShardCommand::Insert(entry)).await?)
     }
 
@@ -223,8 +231,10 @@ struct ShardInternal {
     sync_task: oneshot::Receiver<Error>,
     data_cursor: u64,
 
-    inserted_entries: u32,
-    entry_limit: u32,
+    inserted_entries: u64,
+    inserted_bytes: u64,
+    entry_limit: u64,
+    size_limit: u64,
 
     entries: HashMap<SequenceNo, EntryHeader>,
     assignments: HashMap<SequenceNo, (EntryHeader, Assignment)>,
@@ -505,6 +515,7 @@ impl ShardInternal {
             EntryChange::New(entry) => {
                 self.data_cursor += entry.length as u64 + 4;
                 self.inserted_entries += 1;
+                self.inserted_bytes += entry.length as u64;
                 self.entries.insert(entry.sequence, entry.clone());
                 None
             },
@@ -719,7 +730,7 @@ impl ShardInternal {
     }
 
     pub fn can_insert(&self) -> bool {
-        self.inserted_entries < self.entry_limit
+        self.inserted_entries < self.entry_limit && self.inserted_bytes < self.size_limit
     }
 
     pub fn is_exhausted(&self) -> bool {

@@ -4,8 +4,10 @@ mod operation_journal;
 mod server;
 mod session;
 mod priority;
+mod config;
 
-use session::{Session, Configuration};
+use config::Configuration;
+use session::Session;
 use error::Error;
 
 

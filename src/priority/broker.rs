@@ -8,6 +8,7 @@ use serde::{Serialize, Deserialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
+use crate::config::QueueConfiguration;
 use crate::error::Error;
 use crate::session::{SessionClient, NotificationMask, QueueStatusResponse};
 use super::entry::{Entry, Firmness, ClientId, SequenceNo};
@@ -64,7 +65,9 @@ type PriorityQueue = mpsc::Sender<QueueCommand>;
 #[derive(Serialize, Deserialize)]
 struct QueueHeaderFile {
     name: String,
-    retries: u32
+    retries: u32,
+    shard_max_bytes: u64,
+    shard_max_records: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,18 +83,20 @@ impl QueueHeaderFileData {
     }
 }
 
-pub async fn create_queue(path: &PathBuf, name: &String, client: SessionClient, retries: u32) -> Result<(String, PriorityQueue), Error> {
+pub async fn create_queue(path: &PathBuf, client: SessionClient, config: QueueConfiguration) -> Result<(String, PriorityQueue), Error> {
     let id = uuid::Uuid::new_v4().to_string();
     let path = path.join(&id);
     tokio::fs::DirBuilder::new()
         .recursive(true)
         .create(&path)
         .await?;
+    info!("Creating queue: {} for {id}", config.name);
     tokio::fs::write(path.join("header"), bincode::serialize(&QueueHeaderFileData::V0(QueueHeaderFile {
-        name: name.clone(),
-        retries
+        name: config.name,
+        retries: config.max_retries,
+        shard_max_bytes: config.shard_max_bytes,
+        shard_max_records: config.shard_max_records
     }))?).await?;
-    info!("Creating queue: {name} for {id}");
     return open_queue(path, client).await
 }
 
@@ -114,6 +119,8 @@ pub async fn open_queue(path: PathBuf, client: SessionClient) -> Result<(String,
         pending_requests: Default::default(),
         shards_finished: 0,
         retry_limit: header.retries,
+        shard_max_bytes: header.shard_max_bytes,
+        shard_max_records: header.shard_max_records,
     };
     tokio::spawn(internal.run());
 
@@ -160,7 +167,9 @@ struct PriorityQueueInternal {
     sequence_counter: u64,
     shards_finished: u64,
     path: PathBuf,
-    retry_limit: u32
+    retry_limit: u32,
+    shard_max_bytes: u64,
+    shard_max_records: u64,
 }
 
 impl PriorityQueueInternal {
@@ -177,7 +186,15 @@ impl PriorityQueueInternal {
             let parts: Vec<&str> = name.split("_").collect();
             if parts.len() == 2 && parts[1] == "meta" {
                 if let Ok(id) = parts[0].parse::<u32>() {
-                    loading.push(Shard::open(self.session.clone(), self.command_sink.clone(),self.path.clone(), id, self.retry_limit));
+                    loading.push(Shard::open(
+                        self.session.clone(), 
+                        self.command_sink.clone(),
+                        self.path.clone(), 
+                        id, 
+                        self.retry_limit,
+                        self.shard_max_bytes,
+                        self.shard_max_records,
+                    ));
                 }
             }
         }
@@ -522,7 +539,15 @@ impl PriorityQueueInternal {
                 continue;
             }
 
-            let (shard, _) = Shard::open(self.session.clone(), self.command_sink.clone(), self.path.clone(), id, self.retry_limit).await?;
+            let (shard, _) = Shard::open(
+                self.session.clone(), 
+                self.command_sink.clone(), 
+                self.path.clone(), 
+                id, 
+                self.retry_limit,
+                self.shard_max_bytes,
+                self.shard_max_records
+            ).await?;
 
             self.rw_shards.insert(id, shard);
             return Ok(self.rw_shards.get_mut(&id).unwrap())

@@ -156,7 +156,8 @@ mod test {
     use crate::error::Error;
     use crate::priority::broker::QueueStatus;
     use crate::priority::entry::Firmness;
-    use crate::session::{Session, Configuration, ClientRequest, ClientPost, ClientResponse, ClientFetch, ClientFinish, NotificationName, SessionClient, ClientCreate};
+    use crate::session::{Session, ClientRequest, ClientPost, ClientResponse, ClientFetch, ClientFinish, NotificationName, SessionClient, ClientCreate};
+    use crate::config::Configuration;
 
     struct SendMessages {
         port: u16,
@@ -345,7 +346,9 @@ mod test {
             data_path: path,
             bind_address: "127.0.0.1".to_string(),
             port,
-            compression: 0
+            compression: 0,
+            runtime_create_queues: true,
+            queues: vec![],
         }).await.unwrap();
         let client = session.client();
 
@@ -360,8 +363,10 @@ mod test {
         let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await.unwrap();
         let outgoing_message = ClientRequest::Create(ClientCreate{
             queue: String::from("test_queue"), 
-            retries: retries,
+            retries: Some(retries),
             label: 0,
+            shard_max_entries: Some(80),
+            shard_max_bytes: None,
         });
         ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
 
@@ -413,8 +418,8 @@ mod test {
         let temp = TempDir::new("simple_exchange").unwrap();
         let client = setup(temp.path().to_path_buf(), port).await;
 
-        let producer = SendMessages::new(port).total(10000).concurrent(100).start();
-        let consumer = FetchMessages::new(port).limit(10000).concurrent(100).start();
+        let producer = SendMessages::new(port).total(100).concurrent(100).start();
+        let consumer = FetchMessages::new(port).limit(100).concurrent(100).start();
 
         let mut timeout = std::time::Duration::from_secs(60);
         for (key, value) in std::env::vars() {
@@ -423,9 +428,9 @@ mod test {
             }
         }
 
-        assert_eq!(tokio::time::timeout(timeout, producer).await.unwrap().unwrap().unwrap(), 10000);
+        assert_eq!(tokio::time::timeout(timeout, producer).await.unwrap().unwrap().unwrap(), 100);
         let result = tokio::time::timeout(timeout, consumer).await.unwrap().unwrap().unwrap();
-        assert_eq!(result.finish, 10000);
+        assert_eq!(result.finish, 100);
         assert!(result.drops == 0);
 
         // Still inside `async fn main`...

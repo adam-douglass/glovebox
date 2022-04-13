@@ -5,6 +5,7 @@ mod operation_journal;
 mod server;
 mod session;
 mod priority;
+mod config;
 
 use futures::{SinkExt, StreamExt};
 use hyper_tungstenite::tungstenite::Message;
@@ -15,7 +16,8 @@ use session::{ClientResponse, NotificationName, ClientPost, ClientPop};
 use tempdir::TempDir;
 use tokio_tungstenite::connect_async;
 
-use crate::session::{Session, Configuration, ClientCreate, ClientRequest};
+use crate::config::Configuration;
+use crate::session::{Session, ClientCreate, ClientRequest};
 
 
 struct SendMessages {
@@ -277,7 +279,9 @@ async fn main() -> Result<(), Error>{
             data_path: temp.path().to_path_buf(),
             bind_address: "127.0.0.1".to_string(),
             port,
-            compression: 0
+            compression: 0,
+            runtime_create_queues: true,
+            queues: vec![],
         }).await.unwrap();
         let client = session.client();
 
@@ -292,8 +296,10 @@ async fn main() -> Result<(), Error>{
         let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await.unwrap();
         let outgoing_message = ClientRequest::Create(ClientCreate{
             queue: String::from("test_queue"), 
-            retries,
+            retries: Some(retries),
             label: 0,
+            shard_max_entries: None,
+            shard_max_bytes: None,
         });
         ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
         ws.close(None).await?;

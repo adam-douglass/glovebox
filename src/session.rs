@@ -1,6 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-// use std::io::{Write, Read};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 // use flate2::Compression;
@@ -20,6 +18,8 @@ use crate::priority::broker::{QueueCommand, AssignParams, PopParams, open_queue,
 use crate::priority::{ClientMessageType, ClientMessage};
 use crate::priority::entry::{Firmness, Entry, EntryHeader, NoticeRequest, ClientId, SequenceNo};
 use crate::server::run_api;
+use crate::config::{Configuration, QueueConfiguration};
+
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -112,7 +112,9 @@ pub struct ClientPop {
 pub struct ClientCreate {
     pub queue: String,
     pub label: u64,
-    pub retries: u32
+    pub retries: Option<u32>,
+    pub shard_max_entries: Option<u64>,
+    pub shard_max_bytes: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -403,28 +405,6 @@ pub struct Session {
     queues: HashMap<String, mpsc::Sender<QueueCommand>>,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct Configuration {
-    pub data_path: PathBuf,
-    pub port: u16,
-    pub bind_address: String,
-    pub compression: u32,
-}
-
-impl std::default::Default for Configuration {
-    fn default() -> Self {
-
-        let app_dirs = platform_dirs::AppDirs::new(Some("glovebox"), true).unwrap();
-
-        Self { 
-            data_path: app_dirs.data_dir,
-            port: 80, 
-            bind_address: "127.0.0.1".to_string(), 
-            compression: 9 
-        }
-    }
-}
-
 impl Session {
     pub async fn open(config: Configuration) -> Result<Self, Error> {
         let (command_sink, command_source) = mpsc::channel(128);
@@ -550,7 +530,12 @@ impl Session {
                         client_cache: Default::default(),
                     };
 
-                    let (_, client_con) = create_queue(&self.config.data_path, &create.queue, session_client, create.retries).await?;
+                    let (_, client_con) = create_queue(&self.config.data_path, session_client, QueueConfiguration{
+                        name: create.queue.clone(),
+                        max_retries: create.retries.unwrap_or(u32::MAX),
+                        shard_max_records: create.shard_max_entries.unwrap_or(1 << 16),
+                        shard_max_bytes: create.shard_max_bytes.unwrap_or(1 << 30),
+                    }).await?;
                     self.queues.insert(create.queue, client_con);
 
                     // Notify the requester
