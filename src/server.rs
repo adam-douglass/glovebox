@@ -418,8 +418,8 @@ mod test {
         let temp = TempDir::new("simple_exchange").unwrap();
         let client = setup(temp.path().to_path_buf(), port).await;
 
-        let producer = SendMessages::new(port).total(100).concurrent(100).start();
-        let consumer = FetchMessages::new(port).limit(100).concurrent(100).start();
+        let producer = SendMessages::new(port).total(250).concurrent(10).start();
+        let consumer = FetchMessages::new(port).limit(250).concurrent(10).start();
 
         let mut timeout = std::time::Duration::from_secs(60);
         for (key, value) in std::env::vars() {
@@ -428,9 +428,9 @@ mod test {
             }
         }
 
-        assert_eq!(tokio::time::timeout(timeout, producer).await.unwrap().unwrap().unwrap(), 100);
+        assert_eq!(tokio::time::timeout(timeout, producer).await.unwrap().unwrap().unwrap(), 250);
         let result = tokio::time::timeout(timeout, consumer).await.unwrap().unwrap().unwrap();
-        assert_eq!(result.finish, 100);
+        assert_eq!(result.finish, 250);
         assert!(result.drops == 0);
 
         // Still inside `async fn main`...
