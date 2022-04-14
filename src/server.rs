@@ -342,14 +342,11 @@ mod test {
     }
 
     async fn setup_retries(path: PathBuf, port: u16, retries: u32) -> SessionClient {
-        let mut session = Session::open(Configuration {
-            data_path: path,
-            bind_address: "127.0.0.1".to_string(),
-            port,
-            compression: 0,
-            runtime_create_queues: true,
-            queues: vec![],
-        }).await.unwrap();
+        let mut config: Configuration = Default::default();
+        config.data_path = path;
+        config.port = port;
+
+        let mut session = Session::open(config).await.unwrap();
         let client = session.client();
 
         tokio::spawn(async move {
