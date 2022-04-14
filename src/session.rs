@@ -1,9 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-// use flate2::Compression;
-// use flate2::read::ZlibDecoder;
-// use flate2::write::ZlibEncoder;
 use futures::{StreamExt, SinkExt};
 use hyper_tungstenite::tungstenite::Message;
 use hyper_tungstenite::{HyperWebsocket, WebSocketStream};
@@ -217,9 +214,6 @@ impl TryFrom<ClientMessage> for ClientResponse {
                     Ok(body) => body,
                     Err(err) => err.as_ref().clone(),
                 };
-                // let mut decoder = ZlibDecoder::new(&entry.body[..]);
-                // let mut output = vec![];
-                // decoder.read_to_end(&mut output)?;
 
                 ClientResponse::Message(ClientDelivery {
                     label: note.label,
@@ -773,18 +767,7 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                     let label = message.label();
                     let key = message.queue();
                     let result = match message {
-                        ClientRequest::Post(post) => {
-                            // let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(client.config.compression));
-                            // if let Err(_) = encoder.write_all(&post.message) {
-                            //     continue
-                            // }
-                            // post.message = match encoder.finish() {
-                            //     Ok(message) => message,
-                            //     Err(_) => continue,
-                            // };
-                    
-                            client.post(client_id, post).await
-                        },
+                        ClientRequest::Post(post) => client.post(client_id, post).await,
                         ClientRequest::Fetch(fetch) => client.fetch(client_id, fetch).await,
                         ClientRequest::Finish(finish) => client.finish(client_id, finish).await,
                         ClientRequest::Pop(pop) => client.pop(client_id, pop).await,

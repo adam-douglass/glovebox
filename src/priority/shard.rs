@@ -1,8 +1,12 @@
 use std::collections::{HashMap, BinaryHeap};
+use std::io::{Write, Read};
 use std::ops::Add;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use flate2::Compression;
+use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
 use log::{error, debug};
 use tokio::sync::{mpsc, oneshot};
 
@@ -80,11 +84,11 @@ impl Shard {
         let mut max_sequence: u64 = 0;
         let mut inserted_items = 0;
         let mut inserted_bytes: u64 = 0;
-        let mut operations = vec![];
+        // let mut operations = vec![];
         for (location, operation) in raw_operations {
             internal.apply(&operation);
-            if let EntryChange::New(entry) = &operation {
-                if entry.location + 4 + entry.length as u64 > ending {
+            if let EntryChange::New(entry, encoded_length) = &operation {
+                if entry.location + 4 + *encoded_length as u64 > ending {
                     internal.meta_journal.truncate(location).await?;
                     internal.data_journal.truncate(entry.location).await?;
                     break
@@ -97,7 +101,7 @@ impl Shard {
                 // });
                 max_sequence = max_sequence.max(entry.sequence.0);
             }
-            operations.push(operation);
+            // operations.push(operation);
         }
 
         // internal.data_journal.truncate()
@@ -338,9 +342,14 @@ impl ShardInternal {
     async fn do_insert(&mut self, entry: Entry) -> Result<(), Error> {
         let Entry {mut header, body} = entry;
         header.location = self.data_cursor;
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(self.client.config.compression.into()));
+        encoder.write_all(&body)?;        
+        let body = encoder.finish()?;
+
         debug!("Insert at {}", header.location);
         let note = header.notice;
-        let change = EntryChange::New(header);
+        let change = EntryChange::New(header, body.len() as u32);
         self.apply(&change);
 
         let (index, meta_write) = tokio::join!(
@@ -349,7 +358,7 @@ impl ShardInternal {
         );
         match index {
             Ok(index) => {
-                if let EntryChange::New(entry) = change {
+                if let EntryChange::New(entry, _) = change {
                     if entry.location != index {
                         return Err(Error::ShardIndexDesync(entry.location, index))
                     }
@@ -398,7 +407,11 @@ impl ShardInternal {
         let notice = header.notice;
 
         let body = self.data_journal.read(header.location).await?;
-        let entry = Entry{header, body: Arc::new(body)};
+        let mut decoder = ZlibDecoder::new(&body[..]);
+        let mut output = vec![];
+        decoder.read_to_end(&mut output)?;
+
+        let entry = Entry{header, body: Arc::new(output)};
 
         match params.sync {
             Firmness::Ready => {
@@ -483,7 +496,11 @@ impl ShardInternal {
         let notice = header.notice;
 
         let body = self.data_journal.read(header.location).await?;
-        let entry = Entry{header, body: Arc::new(body)};
+        let mut decoder = ZlibDecoder::new(&body[..]);
+        let mut output = vec![];
+        decoder.read_to_end(&mut output)?;
+
+        let entry = Entry{header, body: Arc::new(output)};
 
         match pop.sync {
             Firmness::Ready => {
@@ -512,8 +529,8 @@ impl ShardInternal {
 
     fn apply(&mut self, op: &EntryChange) -> Option<EntryHeader> {
         match op {
-            EntryChange::New(entry) => {
-                self.data_cursor += entry.length as u64 + 4;
+            EntryChange::New(entry, encoded_length) => {
+                self.data_cursor += *encoded_length as u64 + 4;
                 self.inserted_entries += 1;
                 self.inserted_bytes += entry.length as u64;
                 self.entries.insert(entry.sequence, entry.clone());

@@ -124,7 +124,7 @@ pub struct Entry {
 
 #[derive(Serialize, Deserialize)]
 pub enum EntryChange {
-    New(EntryHeader),
+    New(EntryHeader, u32),
     Assign(ClientId, SequenceNo, chrono::DateTime<chrono::Utc>),
     AssignTimeout(ClientId, SequenceNo, chrono::DateTime<chrono::Utc>),
     Finish(ClientId, SequenceNo),
