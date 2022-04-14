@@ -156,8 +156,8 @@ mod test {
     use crate::error::Error;
     use crate::priority::broker::QueueStatus;
     use crate::priority::entry::Firmness;
-    use crate::session::{Session, ClientRequest, ClientPost, ClientResponse, ClientFetch, ClientFinish, NotificationName, SessionClient, ClientCreate};
-    use crate::config::Configuration;
+    use crate::session::{Session, ClientRequest, ClientPost, ClientResponse, ClientFetch, ClientFinish, NotificationName, SessionClient, ClientCreate, ErrorCode};
+    use crate::config::{Configuration, QueueConfiguration};
 
     struct SendMessages {
         port: u16,
@@ -562,5 +562,73 @@ mod test {
         assert_eq!(drops, 1);
         
         client.stop().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn no_create() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let temp = TempDir::new("simple_exchange").unwrap();
+        let port = 4019;
+        let mut session = Session::open(Configuration {
+            data_path: temp.path().to_path_buf(),
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            compression: 0,
+            runtime_create_queues: false,
+            queues: vec![QueueConfiguration { 
+                name: "test_queue".to_string(), 
+                max_retries: 5, 
+                shard_max_records: 100, 
+                shard_max_bytes: 50000 
+            }],
+        }).await.unwrap();
+        let client = session.client();
+
+        tokio::spawn(async move {
+            if let Err(err) = session.run().await {
+                error!("{err:?}");
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await.unwrap();
+        if let Message::Text(body) = ws.next().await.unwrap().unwrap() {
+            let hello: ClientResponse = serde_json::from_str(&body).unwrap();
+            if let ClientResponse::Hello(client) = hello {
+                info!("test connected as {}", client.id);
+            }
+        }
+
+        let outgoing_message = ClientRequest::Create(ClientCreate{
+            queue: String::from("test_queue_other"), 
+            retries: Some(5),
+            label: 99,
+            shard_max_entries: Some(80),
+            shard_max_bytes: None,
+        });
+        ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+        if let Some(Ok(Message::Text(message))) = ws.next().await {
+            let response: ClientResponse = serde_json::from_str(&message).unwrap();
+            match response {
+                ClientResponse::Error(error) => {
+                    assert_eq!(error.label, 99);
+                    assert_eq!(error.key, String::from("test_queue_other"));
+                    assert_eq!(error.code, ErrorCode::PermissionDenied);
+                }
+                _ => { assert!(false) }
+            }
+        } else {
+            assert!(false)
+        }
+        ws.close(None).await.unwrap();
+
+        let producer = SendMessages::new(port).start();
+        let consumer = FetchMessages::new(port).start();
+
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), producer).await.unwrap().unwrap().unwrap(), 100);
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), consumer).await.unwrap().unwrap().unwrap().fetched, 100);
+
+        client.stop().await.unwrap();
     }
 }

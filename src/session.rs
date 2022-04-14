@@ -175,10 +175,11 @@ pub struct ClientNoMessage {
     pub label: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum ErrorCode {
     NoObject,
-    ObjectAlreadyExists
+    ObjectAlreadyExists,
+    PermissionDenied
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -453,6 +454,18 @@ impl Session {
             };
             self.queues.insert(name, queue);
         }
+
+        for queue in self.config.queues.iter() {
+            let (name, queue) = match create_queue(&self.config.data_path, self.client(), queue.clone()).await {
+                Ok(data) => data,
+                Err(err) => {
+                    error!("Error initializing queue: {err}");
+                    continue;
+                },
+            };
+            self.queues.insert(name, queue);
+        }
+
         return Ok(())
     }
 
@@ -512,6 +525,18 @@ impl Session {
                 }
             },
             SessionMessage::CreateQueue(client, create) => {
+                // Check if we are allowed to create queues
+                if !self.config.runtime_create_queues {
+                    if let Some((con, _)) = self.connections.get(&client) {
+                        let _ = con.send(SocketMessage::PreparedMessage(ClientResponse::Error(ClientError{
+                            label: create.label,
+                            code: ErrorCode::PermissionDenied,
+                            key: create.queue,
+                        }))).await;
+                    }
+                    return Ok(false)
+                }
+
                 // Check if the name is already used
                 if self.queues.contains_key(&create.queue) {
                     if let Some((con, _)) = self.connections.get(&client) {
