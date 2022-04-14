@@ -5,7 +5,7 @@ jobs:
   Test:
     runs-on: ubuntu-latest
     container:
-      image: rust:1-buster
+      image: ghcr.io/${{ github.repository_owner }}/glovebox-environment:temp
       # image: xd009642/tarpaulin:develop-nightly
       options: --security-opt seccomp=unconfined
     steps:
