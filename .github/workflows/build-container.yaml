@@ -1,0 +1,24 @@
+name: Build Test Environment
+on: [workflow_dispatch]
+jobs:
+  Test:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Build image
+        run: docker build .github --file .github/Dockerfile --tag temp
+
+      - name: Log in to registry
+        # This is where you will update the PAT to GITHUB_TOKEN
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push image
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/glovebox-environment:temp
+          docker tag temp $IMAGE
+          docker push $IMAGE
