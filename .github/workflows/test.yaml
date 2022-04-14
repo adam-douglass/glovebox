@@ -4,7 +4,10 @@ on: push
 jobs:
   Test:
     runs-on: ubuntu-latest
-    container: rust:1-buster
+    container:
+      image: rust:1-buster
+      # image: xd009642/tarpaulin:develop-nightly
+      options: --security-opt seccomp=unconfined
     steps:
       - name: Check out repository code
         uses: actions/checkout@v3
