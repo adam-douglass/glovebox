@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::priority::broker::{QueueCommand, AssignParams, PopParams, open_queue, create_queue, FinishParams, QueueStatus};
 use crate::priority::{ClientMessageType, ClientMessage};
 use crate::priority::entry::{Entry, EntryHeader, NoticeRequest, ClientId, SequenceNo};
-use crate::request::{ClientCreate, NotificationName, ClientPost, ClientFetch, ClientFinish, ClientPop, ClientRequest};
+use crate::request::{ClientCreate, NotificationName, ClientPost, ClientFetch, ClientFinish, ClientPop, ClientRequest, ClientRequestJSON};
 use crate::server::run_api;
 use crate::config::{Configuration, QueueConfiguration};
 
@@ -632,14 +632,14 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                         },
                     };
 
-                    let message: Result<ClientRequest, serde_json::Error> = match &message {
+                    let message: Result<ClientRequestJSON, serde_json::Error> = match &message {
                         Message::Text(text) => serde_json::from_str(text),
                         Message::Binary(data) => serde_json::from_slice(data),
                         _ => continue
                     };
 
-                    let message = match message {
-                        Ok(message) => message,
+                    let message: ClientRequest = match message {
+                        Ok(message) => message.into(),
                         Err(err) => {
                             error!("json error {err:?}");
                             continue;

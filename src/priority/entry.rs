@@ -21,7 +21,7 @@ pub struct SequenceNo(pub u64);
 // }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Firmness {
     Ready,

@@ -157,7 +157,7 @@ mod test {
     use crate::priority::broker::QueueStatus;
     use crate::priority::entry::Firmness;
     use crate::session::{Session, ClientResponse, SessionClient, ErrorCode};
-    use crate::request::{ClientRequest, ClientPost, ClientFetch, ClientFinish, NotificationName, ClientCreate};
+    use crate::request::{ClientRequest, ClientPost, ClientFetch, ClientFinish, NotificationName, ClientCreate, ClientRequestJSON};
     use crate::config::{Configuration, QueueConfiguration};
 
     struct SendMessages {
@@ -206,13 +206,13 @@ mod test {
                 let _ = get_lock.recv().await;
                 let outgoing_message = ClientRequest::Post(ClientPost{
                     queue: "test_queue".to_owned(),
-                    message: b"TEST MESSAGE".to_vec(),
+                    message: b"TEST MESSAGE".to_vec().into(),
                     priority: 1,
                     label: ii,
                     notify: vec![NotificationName::Write]
                 });
                 send_labels.lock().unwrap().insert(ii);
-                send.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+                send.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
             };
             send
         });
@@ -295,7 +295,7 @@ mod test {
                 outstanding.insert(ii);
                 let outgoing_message = ClientRequest::Fetch(ClientFetch{queue: queue.clone(), label:ii,sync:Firmness::Write, blocking: true, work_timeout: 0.5, block_timeout: 30.0 });
                 fetch_count += 1;
-                ws.send(Message::Text(serde_json::to_string(&outgoing_message)?)).await.unwrap();
+                ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message))?)).await.unwrap();
             }
             let confirm = ws.next().await.unwrap()?;
             if let Message::Text(body) = confirm {
@@ -314,7 +314,7 @@ mod test {
                                 label: None,
                                 response: None,
                             });
-                            ws.send(Message::Text(serde_json::to_string(&outgoing_message)?)).await.unwrap();
+                            ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message))?)).await.unwrap();
                             finish_count +=1;
                             info!("finished {finish_count}");
                         } else {
@@ -366,7 +366,7 @@ mod test {
             shard_max_entries: Some(80),
             shard_max_bytes: None,
         });
-        ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+        ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
 
         return client;
     }
@@ -509,7 +509,7 @@ mod test {
             label,
             notify: vec![NotificationName::Retry, NotificationName::Drop]
         });
-        ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+        ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
 
         // Fetch three times
         for _ in 0..3 {
@@ -521,7 +521,7 @@ mod test {
                 work_timeout: 0.1, 
                 block_timeout: 5.0 
             });
-            ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+            ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
         }
         
         // Wait for failure message
@@ -605,7 +605,7 @@ mod test {
             shard_max_entries: Some(80),
             shard_max_bytes: None,
         });
-        ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+        ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
         if let Some(Ok(Message::Text(message))) = ws.next().await {
             let response: ClientResponse = serde_json::from_str(&message).unwrap();
             match response {

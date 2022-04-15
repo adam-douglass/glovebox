@@ -9,13 +9,11 @@ mod config;
 mod test;
 mod request;
 
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use hyper_tungstenite::tungstenite::Message;
-use log::{error, info, debug};
+use log::{error, info};
 use error::Error;
-use priority::entry::Firmness;
-use session::ClientResponse;
-use request::{NotificationName, ClientPost, ClientPop, ClientCreate, ClientRequest};
+use request::{ClientCreate, ClientRequest, ClientRequestJSON};
 use tempdir::TempDir;
 use test::{SendMessages, PopMessages};
 use tokio_tungstenite::connect_async;
@@ -53,7 +51,7 @@ async fn main() -> Result<(), Error>{
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await.unwrap();
-        let outgoing_message = ClientRequest::Create(ClientCreate{
+        let outgoing_message = ClientRequestJSON::Create(ClientCreate{
             queue: String::from("test_queue"), 
             retries: Some(retries),
             label: 0,

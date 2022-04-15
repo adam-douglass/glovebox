@@ -6,7 +6,7 @@ use tokio_tungstenite::connect_async;
 use crate::error::Error;
 use crate::priority::entry::Firmness;
 use crate::session::ClientResponse;
-use crate::request::{NotificationName, ClientPost, ClientPop, ClientRequest, self};
+use crate::request::{NotificationName, ClientPost, ClientPop, ClientRequest, ClientRequestJSON};
 
 
 pub struct SendMessages {
@@ -54,13 +54,13 @@ async fn send_messages(port: u16, total: u64, batch_size: u64) -> Result<f32, Er
 
             let outgoing_message = ClientRequest::Post(ClientPost{
                 queue: "test_queue".to_owned(),
-                message: "TEST MESSAGE".as_bytes().to_vec(),
+                message: "TEST MESSAGE".as_bytes().to_vec().into(),
                 priority: 1,
                 label,
                 notify: vec![NotificationName::Ready, NotificationName::Finish]
             });
             sent.push(label);
-            ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+            ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
             label += 1;
         }
 
@@ -232,7 +232,7 @@ async fn pop_messages(port: u16, total: u64, concurrent: u64) -> Result<f32, Err
                 blocking: true, block_timeout: 30.0 
             });
             label += 1;
-            ws.send(Message::Text(serde_json::to_string(&outgoing_message)?)).await.unwrap();
+            ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message))?)).await.unwrap();
         }
 
         let confirm = ws.next().await.unwrap()?;
@@ -264,7 +264,7 @@ mod test {
     use tokio_tungstenite::connect_async;
     use crate::session::Session;
     use crate::config::Configuration;
-    use crate::request::{ClientCreate, ClientRequest};
+    use crate::request::{ClientCreate, ClientRequest, ClientRequestJSON};
 
     use super::{SendMessages, PopMessages};
 
@@ -301,7 +301,7 @@ mod test {
                 shard_max_entries: None,
                 shard_max_bytes: None,
             });
-            ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
+            ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
             ws.close(None).await.unwrap();
 
             client

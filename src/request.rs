@@ -1,12 +1,10 @@
-use chrono::serde::ts_milliseconds::serialize;
 use serde::{Serialize, Deserialize, Serializer};
-use serde_with::serde_as;
 
 use crate::priority::entry::Firmness;
 use crate::session::NotificationMask;
 
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum NotificationName {
     Ready,
@@ -44,32 +42,51 @@ impl From<&Vec<NotificationName>> for NotificationMask {
     }
 }
 
-// #[derive(Serialize, Deserialize, Debug, PartialEq)]
-// #[serde(tag = "encoding", content = "message", rename_all = "lowercase")]
-// pub enum Message { 
-//     Text(String),
-//     Base64(String),
-//     Bytes(Vec<u8>)
-// }
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(untagged)]
+pub enum MessageJSON {
+    Binary(Vec<u8>),
+    String(String),
+}
 
-// impl TryInto<Vec<u8>> for Message {
-//     type Error = base64::DecodeError;
+impl From<String> for MessageJSON {
+    fn from(value: String) -> Self {
+        MessageJSON::String(value)
+    }
+}
 
-//     fn try_into(self) -> Result<Vec<u8>, Self::Error> {
-//         Ok(match self {
-//             Message::Text(data) => data.as_bytes().to_vec(),
-//             Message::Base64(data) => base64::decode(data)?,
-//             Message::Bytes(data) => data,
-//         })
-//     }
-// }
+impl From<Vec<u8>> for MessageJSON {
+    fn from(value: Vec<u8>) -> Self {
+        MessageJSON::Binary(value)
+    }
+}
+
+impl MessageJSON {
+    pub fn bytes(self) -> Vec<u8> {
+        match self {
+            MessageJSON::Binary(value) => value,
+            MessageJSON::String(value) => value.as_bytes().to_vec(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub struct ClientPostJSON {
+    pub queue: String,
+    #[serde(serialize_with="message_encoder")]
+    pub message: MessageJSON,
+    #[serde(default="default_priority")]
+    pub priority: i16,
+    #[serde(default="default_label")]
+    pub label: u64,
+    #[serde(default)]
+    pub notify: Vec<NotificationName>,
+}
 
 
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ClientPost {
     pub queue: String,
-    #[serde(serialize_with="message_encoder", deserialize_with="serde_with::rust::bytes_or_string::deserialize")]
     pub message: Vec<u8>,
     #[serde(default="default_priority")]
     pub priority: i16,
@@ -79,21 +96,56 @@ pub struct ClientPost {
     pub notify: Vec<NotificationName>,
 }
 
-fn message_encoder<S>(data: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
-    if serializer.is_human_readable() {
-        match std::str::from_utf8(&data) {
-            Ok(string) => serializer.serialize_str(string),
-            Err(_) => serializer.serialize_bytes(&data),
+impl From<ClientPostJSON> for ClientPost {
+    fn from(post: ClientPostJSON) -> Self {
+        ClientPost {
+            queue: post.queue,
+            message: post.message.bytes(),
+            priority: post.priority,
+            label: post.label,
+            notify: post.notify,
         }
-    } else {
-        serializer.serialize_bytes(&data)
+    }
+}
+
+impl From<ClientPost> for ClientPostJSON {
+    fn from(post: ClientPost) -> Self {
+        ClientPostJSON {
+            queue: post.queue,
+            message: MessageJSON::Binary(post.message),
+            priority: post.priority,
+            label: post.label,
+            notify: post.notify,
+        }
+    }
+}
+
+fn message_encoder<S>(data: &MessageJSON, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    match data {
+        MessageJSON::Binary(data) => {
+            if serializer.is_human_readable() {
+                match std::str::from_utf8(&data) {
+                    Ok(string) => serializer.serialize_str(string),
+                    Err(_) => serializer.serialize_bytes(&data),
+                }
+            } else {
+                serializer.serialize_bytes(&data)
+            }
+        }
+        MessageJSON::String(data) => {
+            if serializer.is_human_readable() {
+                serializer.serialize_str(data)
+            } else {
+                serializer.serialize_bytes(&data.as_bytes())
+            }
+        },
     }
 }
 
 pub fn default_priority() -> i16 { 0 }
 pub fn default_label() -> u64 { 0 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ClientFetch {
     pub queue: String,
     pub blocking: bool,
@@ -103,7 +155,7 @@ pub struct ClientFetch {
     pub label: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ClientFinish {
     pub queue: String,
     pub sequence: u64,
@@ -114,7 +166,7 @@ pub struct ClientFinish {
     pub response: Option<Firmness>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ClientPop {
     pub queue: String,
     pub sync: Firmness,
@@ -123,7 +175,7 @@ pub struct ClientPop {
     pub label: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ClientCreate {
     pub queue: String,
     pub label: u64,
@@ -132,8 +184,26 @@ pub struct ClientCreate {
     pub shard_max_bytes: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(tag="type", rename_all="lowercase")]
+pub enum ClientRequestJSON {
+    Post(ClientPostJSON),
+    Fetch(ClientFetch),
+    Finish(ClientFinish),
+    Pop(ClientPop),
+    Create(ClientCreate),
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub enum ClientRequestBin {
+    Post(ClientPost),
+    Fetch(ClientFetch),
+    Finish(ClientFinish),
+    Pop(ClientPop),
+    Create(ClientCreate),
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum ClientRequest {
     Post(ClientPost),
     Fetch(ClientFetch),
@@ -141,6 +211,56 @@ pub enum ClientRequest {
     Pop(ClientPop),
     Create(ClientCreate),
 }
+
+impl From<ClientRequest> for ClientRequestJSON {
+    fn from(value: ClientRequest) -> Self {
+        match value {
+            ClientRequest::Post(v) => ClientRequestJSON::Post(v.into()),
+            ClientRequest::Fetch(v) => ClientRequestJSON::Fetch(v),
+            ClientRequest::Finish(v) => ClientRequestJSON::Finish(v),
+            ClientRequest::Pop(v) => ClientRequestJSON::Pop(v),
+            ClientRequest::Create(v) => ClientRequestJSON::Create(v),
+        }
+    }
+}
+
+impl From<ClientRequestJSON> for ClientRequest {
+    fn from(value: ClientRequestJSON) -> Self {
+        match value {
+            ClientRequestJSON::Post(v) => ClientRequest::Post(v.into()),
+            ClientRequestJSON::Fetch(v) => ClientRequest::Fetch(v),
+            ClientRequestJSON::Finish(v) => ClientRequest::Finish(v),
+            ClientRequestJSON::Pop(v) => ClientRequest::Pop(v),
+            ClientRequestJSON::Create(v) => ClientRequest::Create(v),
+        }
+    }
+}
+
+
+impl From<ClientRequest> for ClientRequestBin {
+    fn from(value: ClientRequest) -> Self {
+        match value {
+            ClientRequest::Post(v) => ClientRequestBin::Post(v),
+            ClientRequest::Fetch(v) => ClientRequestBin::Fetch(v),
+            ClientRequest::Finish(v) => ClientRequestBin::Finish(v),
+            ClientRequest::Pop(v) => ClientRequestBin::Pop(v),
+            ClientRequest::Create(v) => ClientRequestBin::Create(v),
+        }
+    }
+}
+
+impl From<ClientRequestBin> for ClientRequest {
+    fn from(value: ClientRequestBin) -> Self {
+        match value {
+            ClientRequestBin::Post(v) => ClientRequest::Post(v),
+            ClientRequestBin::Fetch(v) => ClientRequest::Fetch(v),
+            ClientRequestBin::Finish(v) => ClientRequest::Finish(v),
+            ClientRequestBin::Pop(v) => ClientRequest::Pop(v),
+            ClientRequestBin::Create(v) => ClientRequest::Create(v),
+        }
+    }
+}
+
 
 impl ClientRequest {
     pub fn label(&self) -> u64 {
@@ -166,17 +286,18 @@ impl ClientRequest {
 
 #[cfg(test)]
 mod test {
-    use crate::request::{default_priority, default_label};
+    use crate::request::{default_priority, default_label, ClientRequestBin};
 
-    use super::{ClientRequest, ClientPost};
+    use super::{ClientRequest, ClientPost, ClientRequestJSON};
 
     #[tokio::test]
     async fn parse_post() {
-        let value: ClientRequest = serde_json::from_str(r#"{"type": "post", "queue": "abc", "message": "hello"}"#).unwrap();
+        let value: ClientRequestJSON = serde_json::from_str(r#"{"type": "post", "queue": "abc", "message": "hello"}"#).unwrap();
+        let value: ClientRequest = value.into();
         if let ClientRequest::Post(post) = &value {
             assert_eq!(post, &ClientPost{ 
                 queue: "abc".to_string(), 
-                message: "hello".as_bytes().to_vec(), 
+                message: String::from("hello").into_bytes(), 
                 priority: default_priority(), 
                 label: default_label(), 
                 notify: vec![] 
@@ -184,9 +305,34 @@ mod test {
         } else {
             assert!(false);
         }
-        let encoded = serde_json::to_string(&value).unwrap();
+        let encoded = serde_json::to_string(&ClientRequestJSON::from(value)).unwrap();
         assert!(encoded.contains(r#""type":"post""#));
         assert!(encoded.contains(r#""message":"hello""#));
         assert!(encoded.contains(r#""queue":"abc""#));
+    }
+
+    #[tokio::test]
+    async fn parse_binary_post() {
+        let value: ClientRequestJSON = serde_json::from_str(r#"{"type": "post", "queue": "abc", "message": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 255]}"#).unwrap();
+        let value: ClientRequest = value.into();
+        if let ClientRequest::Post(post) = &value {
+            assert_eq!(post, &ClientPost{ 
+                queue: "abc".to_string(), 
+                message: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 255], 
+                priority: default_priority(), 
+                label: default_label(), 
+                notify: vec![] 
+            });
+        } else {
+            assert!(false);
+        }
+        let encoded = serde_json::to_string(&ClientRequestJSON::from(value.clone())).unwrap();
+        println!("{}", encoded);
+        assert!(encoded.contains(r#""type":"post""#));
+        assert!(encoded.contains(r#""message":[0,1,2,3,4,5,6,7,8,9,10,255]"#));
+        assert!(encoded.contains(r#""queue":"abc""#));
+
+        let second_value: ClientRequestBin = bincode::deserialize(&bincode::serialize(&ClientRequestBin::from(value.clone())).unwrap()).unwrap();
+        assert_eq!(second_value, ClientRequestBin::from(value));
     }
 }
