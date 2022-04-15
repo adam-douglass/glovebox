@@ -14,8 +14,8 @@ use crate::error::Error;
 use crate::priority::broker::{QueueCommand, AssignParams, PopParams, open_queue, create_queue, FinishParams, QueueStatus};
 use crate::priority::ClientMessage;
 use crate::priority::entry::{Entry, EntryHeader, NoticeRequest, ClientId, SequenceNo};
-use crate::request::{ClientCreate, NotificationName, ClientPost, ClientFetch, ClientFinish, ClientPop, ClientRequest, ClientRequestJSON};
-use crate::response::{ClientResponse, ClientError, ErrorCode, ClientNotice, ClientResponseJSON, ClientHello};
+use crate::request::{ClientCreate, NotificationName, ClientPost, ClientFetch, ClientFinish, ClientPop, ClientRequest, ClientRequestJSON, ClientRequestBin};
+use crate::response::{ClientResponse, ClientError, ErrorCode, ClientNotice, ClientResponseJSON, ClientHello, ClientResponseBin};
 use crate::server::run_api;
 use crate::config::{Configuration, QueueConfiguration};
 
@@ -420,10 +420,11 @@ impl Session {
             },
         };
 
+        let hello = ClientResponse::Hello(ClientHello{id: client_id.0});
         if binary {
-            socket.send(Message::Binary(bincode::serialize(&ClientResponse::Hello(ClientHello{id: client_id.0}))?)).await?;
+            socket.send(Message::Binary(bincode::serialize(&ClientResponseBin::from(hello))?)).await?;
         } else {
-            socket.send(Message::Text(serde_json::to_string(&ClientResponseJSON::Hello(ClientHello{id: client_id.0}))?)).await?;
+            socket.send(Message::Text(serde_json::to_string(&ClientResponseJSON::from(hello))?)).await?;
         }
 
         if let Some((sink, _)) = self.connections.get_mut(&client_id) {
@@ -462,7 +463,7 @@ async fn run_socket(client_id: ClientId, durable: bool, binary: bool, mut socket
 
     let encode = if binary {
         |message: ClientResponse| -> Option<Message> {
-            match bincode::serialize(&message) {
+            match bincode::serialize(&ClientResponseBin::from(message)) {
                 Ok(message) => Some(Message::Binary(message)),
                 Err(err) => { error!("Send Error: {err}"); None },
             }
@@ -580,12 +581,15 @@ async fn run_socket(client_id: ClientId, durable: bool, binary: bool, mut socket
                             };
                             message.into()
                         },
-                        Message::Binary(data) => match bincode::deserialize(data) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                error!("bincode error {err:?}");
-                                continue;
-                            }
+                        Message::Binary(data) => {
+                            let message: ClientRequestBin = match bincode::deserialize(data) {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    error!("bincode error {err:?}");
+                                    continue;
+                                }
+                            };
+                            message.into()
                         },
                         _ => continue
                     };

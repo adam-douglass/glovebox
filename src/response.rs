@@ -77,6 +77,20 @@ pub enum ClientResponseJSON {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub enum ClientResponseBinV0 {
+    Message(ClientDelivery),
+    Notice(ClientNotice),
+    Hello(ClientHello),
+    NoMessage(ClientNoMessage),
+    Error(ClientError),
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub enum ClientResponseBin {
+    V0(ClientResponseBinV0)
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum ClientResponse {
     Message(ClientDelivery),
     Notice(ClientNotice),
@@ -127,6 +141,32 @@ impl From<ClientResponse> for ClientResponseJSON {
             ClientResponse::Hello(v) => ClientResponseJSON::Hello(v),
             ClientResponse::NoMessage(v) => ClientResponseJSON::NoMessage(v),
             ClientResponse::Error(v) => ClientResponseJSON::Error(v),
+        }
+    }
+}
+
+impl From<ClientResponse> for ClientResponseBin {
+    fn from(resp: ClientResponse) -> Self {
+        ClientResponseBin::V0(match resp {
+            ClientResponse::Message(v) => ClientResponseBinV0::Message(v),
+            ClientResponse::Notice(v) => ClientResponseBinV0::Notice(v),
+            ClientResponse::Hello(v) => ClientResponseBinV0::Hello(v),
+            ClientResponse::NoMessage(v) => ClientResponseBinV0::NoMessage(v),
+            ClientResponse::Error(v) => ClientResponseBinV0::Error(v),
+        })
+    }
+}
+
+impl From<ClientResponseBin> for ClientResponse {
+    fn from(resp: ClientResponseBin) -> Self {
+        match resp {
+            ClientResponseBin::V0(resp) => match resp {
+                ClientResponseBinV0::Message(v) => ClientResponse::Message(v),
+                ClientResponseBinV0::Notice(v) => ClientResponse::Notice(v),
+                ClientResponseBinV0::Hello(v) => ClientResponse::Hello(v),
+                ClientResponseBinV0::NoMessage(v) => ClientResponse::NoMessage(v),
+                ClientResponseBinV0::Error(v) => ClientResponse::Error(v),
+            },
         }
     }
 }

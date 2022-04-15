@@ -193,16 +193,21 @@ pub enum ClientRequestJSON {
     Create(ClientCreate),
 }
 
-// #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
-// pub enum ClientRequestBin {
-//     Post(ClientPost),
-//     Fetch(ClientFetch),
-//     Finish(ClientFinish),
-//     Pop(ClientPop),
-//     Create(ClientCreate),
-// }
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub enum ClientRequestBinV0 {
+    Post(ClientPost),
+    Fetch(ClientFetch),
+    Finish(ClientFinish),
+    Pop(ClientPop),
+    Create(ClientCreate),
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub enum ClientRequestBin {
+    V0(ClientRequestBinV0)
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum ClientRequest {
     Post(ClientPost),
     Fetch(ClientFetch),
@@ -236,29 +241,31 @@ impl From<ClientRequestJSON> for ClientRequest {
 }
 
 
-// impl From<ClientRequest> for ClientRequestBin {
-//     fn from(value: ClientRequest) -> Self {
-//         match value {
-//             ClientRequest::Post(v) => ClientRequestBin::Post(v),
-//             ClientRequest::Fetch(v) => ClientRequestBin::Fetch(v),
-//             ClientRequest::Finish(v) => ClientRequestBin::Finish(v),
-//             ClientRequest::Pop(v) => ClientRequestBin::Pop(v),
-//             ClientRequest::Create(v) => ClientRequestBin::Create(v),
-//         }
-//     }
-// }
+impl From<ClientRequest> for ClientRequestBin {
+    fn from(value: ClientRequest) -> Self {
+        ClientRequestBin::V0(match value {
+            ClientRequest::Post(v) => ClientRequestBinV0::Post(v),
+            ClientRequest::Fetch(v) => ClientRequestBinV0::Fetch(v),
+            ClientRequest::Finish(v) => ClientRequestBinV0::Finish(v),
+            ClientRequest::Pop(v) => ClientRequestBinV0::Pop(v),
+            ClientRequest::Create(v) => ClientRequestBinV0::Create(v),
+        })
+    }
+}
 
-// impl From<ClientRequestBin> for ClientRequest {
-//     fn from(value: ClientRequestBin) -> Self {
-//         match value {
-//             ClientRequestBin::Post(v) => ClientRequest::Post(v),
-//             ClientRequestBin::Fetch(v) => ClientRequest::Fetch(v),
-//             ClientRequestBin::Finish(v) => ClientRequest::Finish(v),
-//             ClientRequestBin::Pop(v) => ClientRequest::Pop(v),
-//             ClientRequestBin::Create(v) => ClientRequest::Create(v),
-//         }
-//     }
-// }
+impl From<ClientRequestBin> for ClientRequest {
+    fn from(value: ClientRequestBin) -> Self {
+        match value {
+            ClientRequestBin::V0(value) => match value {
+                ClientRequestBinV0::Post(v) => ClientRequest::Post(v),
+                ClientRequestBinV0::Fetch(v) => ClientRequest::Fetch(v),
+                ClientRequestBinV0::Finish(v) => ClientRequest::Finish(v),
+                ClientRequestBinV0::Pop(v) => ClientRequest::Pop(v),
+                ClientRequestBinV0::Create(v) => ClientRequest::Create(v),
+            }
+        }
+    }
+}
 
 
 impl ClientRequest {
@@ -287,7 +294,7 @@ impl ClientRequest {
 mod test {
     use crate::request::{default_priority, default_label};
 
-    use super::{ClientRequest, ClientPost, ClientRequestJSON};
+    use super::{ClientRequest, ClientPost, ClientRequestJSON, ClientRequestBin};
 
     #[tokio::test]
     async fn parse_post() {
@@ -331,7 +338,8 @@ mod test {
         assert!(encoded.contains(r#""message":[0,1,2,3,4,5,6,7,8,9,10,255]"#));
         assert!(encoded.contains(r#""queue":"abc""#));
 
-        let second_value: ClientRequest = bincode::deserialize(&bincode::serialize(&value.clone()).unwrap()).unwrap();
+        let second_value: ClientRequestBin = bincode::deserialize(&bincode::serialize(&ClientRequestBin::from(value.clone())).unwrap()).unwrap();
+        let second_value: ClientRequest = second_value.into();
         assert_eq!(second_value, value);
     }
 }

@@ -6,8 +6,8 @@ use log::{info, debug};
 use tokio_tungstenite::connect_async;
 
 use crate::priority::entry::Firmness;
-use crate::response::ClientResponse;
-use crate::request::{NotificationName, ClientPost, ClientPop, ClientRequest};
+use crate::response::{ClientResponse, ClientResponseBin};
+use crate::request::{NotificationName, ClientPost, ClientPop, ClientRequest, ClientRequestBin};
 
 
 pub struct SendMessages {
@@ -41,7 +41,8 @@ async fn send_messages(port: u16, total: u64, batch_size: u64) -> Result<f32, an
 
     let (mut ws, _) = connect_async(request).await?;
     if let Message::Binary(body) = ws.next().await.unwrap()? {
-        let hello: ClientResponse = bincode::deserialize(&body)?;
+        let hello: ClientResponseBin = bincode::deserialize(&body)?;
+        let hello: ClientResponse = hello.into();
         if let ClientResponse::Hello(client) = hello {
             info!("Producer connected as {}", client.id);
         }
@@ -65,14 +66,15 @@ async fn send_messages(port: u16, total: u64, batch_size: u64) -> Result<f32, an
                 notify: vec![NotificationName::Ready, NotificationName::Finish]
             });
             sent.push(label);
-            ws.send(Message::Binary(bincode::serialize(&outgoing_message).unwrap())).await.unwrap();
+            ws.send(Message::Binary(bincode::serialize(&ClientRequestBin::from(outgoing_message)).unwrap())).await.unwrap();
             label += 1;
         }
 
         while sent.len() > 0 {
             let confirm = ws.next().await.unwrap()?;
             if let Message::Binary(body) = confirm {
-                let confirm: ClientResponse = bincode::deserialize(&body)?;
+                let confirm: ClientResponseBin = bincode::deserialize(&body)?;
+                let confirm: ClientResponse = confirm.into();
                 if let ClientResponse::Notice(notice) = confirm {
                     if let Some(index) = sent.iter().position(|&i| i == notice.label) {
                         sent.swap_remove(index);
@@ -217,7 +219,8 @@ async fn pop_messages(port: u16, total: u64, concurrent: u64) -> Result<f32, any
 
     let (mut ws, _) = connect_async(request).await?;
     if let Message::Binary(body) = ws.next().await.unwrap()? {
-        let hello: ClientResponse = bincode::deserialize(&body)?;
+        let hello: ClientResponseBin = bincode::deserialize(&body)?;
+        let hello: ClientResponse = hello.into();
         if let ClientResponse::Hello(client) = hello {
             info!("Producer connected as {}", client.id);
         }
@@ -240,12 +243,13 @@ async fn pop_messages(port: u16, total: u64, concurrent: u64) -> Result<f32, any
                 timeout: Some(30.0)
             });
             label += 1;
-            ws.send(Message::Binary(bincode::serialize(&outgoing_message)?)).await.unwrap();
+            ws.send(Message::Binary(bincode::serialize(&ClientRequestBin::from(outgoing_message))?)).await.unwrap();
         }
 
         let confirm = ws.next().await.unwrap()?;
         if let Message::Binary(body) = confirm {
-            let confirm: ClientResponse = bincode::deserialize(&body)?;
+            let confirm: ClientResponseBin = bincode::deserialize(&body)?;
+            let confirm: ClientResponse = confirm.into();
             match confirm {
                 ClientResponse::Message(_) => {
                     popped += 1;
