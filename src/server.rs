@@ -68,6 +68,17 @@ async fn setup_connection(req: Request<Body>) -> Result<Response<Body>, Infallib
         None => false,
     };
 
+    let binary = match req.headers().get("Binary") {
+        Some(header) => match header.to_str() {
+            Ok(header) => {
+                let header = header.to_lowercase();
+                header == "1" || header == "true"
+            },
+            Err(_) => false,
+        },
+        None => false,
+    };
+
     // Check if the request is a websocket upgrade request.
     if hyper_tungstenite::is_upgrade_request(&req) {
         let (response, websocket) = match hyper_tungstenite::upgrade(req, None) {
@@ -78,7 +89,7 @@ async fn setup_connection(req: Request<Body>) -> Result<Response<Body>, Infallib
         };
 
         // Spawn a task to handle the websocket connection.
-        if let Err(e) = session.serve_websocket(websocket, client_id, durable_session).await {
+        if let Err(e) = session.serve_websocket(websocket, client_id, durable_session, binary).await {
             error!("Error in websocket connection: {:?}", e);
         }
 
@@ -156,8 +167,10 @@ mod test {
     use crate::error::Error;
     use crate::priority::broker::QueueStatus;
     use crate::priority::entry::Firmness;
-    use crate::session::{Session, ClientResponse, SessionClient, ErrorCode};
-    use crate::request::{ClientRequest, ClientPost, ClientFetch, ClientFinish, NotificationName, ClientCreate, ClientRequestJSON};
+    use crate::response::{ClientResponseJSON, ErrorCode};
+    use crate::session::{Session, SessionClient};
+    use crate::request::{ClientRequest, ClientPost, ClientFetch, ClientFinish, NotificationName, ClientCreate, ClientRequestJSON, MessageJSON};
+    
     use crate::config::{Configuration, QueueConfiguration};
 
     struct SendMessages {
@@ -187,8 +200,8 @@ mod test {
     async fn send_messages(port: u16, total: u64, concurrent: usize) -> Result<u64, Error> {
         let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
         if let Message::Text(body) = ws.next().await.unwrap()? {
-            let hello: ClientResponse = serde_json::from_str(&body)?;
-            if let ClientResponse::Hello(client) = hello {
+            let hello: ClientResponseJSON = serde_json::from_str(&body)?;
+            if let ClientResponseJSON::Hello(client) = hello {
                 info!("Producer connected as {}", client.id);
             }
         }
@@ -220,8 +233,8 @@ mod test {
         for _ii in 1 ..= total {
             let confirm = recv.next().await.unwrap()?;
             if let Message::Text(body) = confirm {
-                let confirm: ClientResponse = serde_json::from_str(&body)?;
-                if let ClientResponse::Notice(notice) = confirm {
+                let confirm: ClientResponseJSON = serde_json::from_str(&body)?;
+                if let ClientResponseJSON::Notice(notice) = confirm {
                     assert!(labels.lock().unwrap().remove(&notice.label));
                     assert_eq!(notice.notice, NotificationName::Write);
                     count += 1;
@@ -276,8 +289,8 @@ mod test {
     async fn fetch_messages(port: u16, drop: f32, limit: i32, concurrent: u32) -> Result<FetchResult, Error> {
         let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
         if let Message::Text(body) = ws.next().await.unwrap()? {
-            let hello: ClientResponse = serde_json::from_str(&body)?;
-            if let ClientResponse::Hello(client) = hello {
+            let hello: ClientResponseJSON = serde_json::from_str(&body)?;
+            if let ClientResponseJSON::Hello(client) = hello {
                 info!("Consumer connected as {}", client.id);
             }
         }
@@ -299,11 +312,11 @@ mod test {
             }
             let confirm = ws.next().await.unwrap()?;
             if let Message::Text(body) = confirm {
-                let confirm: ClientResponse = serde_json::from_str(&body)?;
+                let confirm: ClientResponseJSON = serde_json::from_str(&body)?;
                 match confirm  {
-                    ClientResponse::Message(message) => {
+                    ClientResponseJSON::Message(message) => {
                         assert!(outstanding.remove(&message.label));
-                        assert_eq!(message.body, b"TEST MESSAGE");
+                        assert_eq!(message.body, MessageJSON::String("TEST MESSAGE".to_string()));
                         fetched_count += 1;
 
                         if thread_rng().gen::<f32>() > drop {
@@ -494,8 +507,8 @@ mod test {
         let client = setup_retries(temp.path().to_path_buf(), port, 3).await;
         let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await.unwrap();
         if let Message::Text(body) = ws.next().await.unwrap().unwrap() {
-            let hello: ClientResponse = serde_json::from_str(&body).unwrap();
-            if let ClientResponse::Hello(client) = hello {
+            let hello: ClientResponseJSON = serde_json::from_str(&body).unwrap();
+            if let ClientResponseJSON::Hello(client) = hello {
                 info!("test connected as {}", client.id);
             }
         }
@@ -533,9 +546,9 @@ mod test {
                 Err(_) => break,
             };
             if let Message::Text(body) = message {
-                let confirm: ClientResponse = serde_json::from_str(&body).unwrap();
+                let confirm: ClientResponseJSON = serde_json::from_str(&body).unwrap();
                 match confirm {
-                    ClientResponse::Notice(note)=>{
+                    ClientResponseJSON::Notice(note)=>{
                         assert_eq!(note.label, label);
                         if note.notice == NotificationName::Retry {
                             info!("retry notice");
@@ -547,12 +560,12 @@ mod test {
                             assert!(false);
                         }
                     }
-                    ClientResponse::Message(_) => {
+                    ClientResponseJSON::Message(_) => {
                         info!("drop message, we want server to retry");
                     },
-                    ClientResponse::Hello(_) => todo!("hello"),
-                    ClientResponse::NoMessage(_) => todo!(),
-                    ClientResponse::Error(_) => todo!(), 
+                    ClientResponseJSON::Hello(_) => todo!("hello"),
+                    ClientResponseJSON::NoMessage(_) => todo!(),
+                    ClientResponseJSON::Error(_) => todo!(), 
                 }
             }
         }
@@ -592,8 +605,8 @@ mod test {
 
         let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await.unwrap();
         if let Message::Text(body) = ws.next().await.unwrap().unwrap() {
-            let hello: ClientResponse = serde_json::from_str(&body).unwrap();
-            if let ClientResponse::Hello(client) = hello {
+            let hello: ClientResponseJSON = serde_json::from_str(&body).unwrap();
+            if let ClientResponseJSON::Hello(client) = hello {
                 info!("test connected as {}", client.id);
             }
         }
@@ -607,9 +620,9 @@ mod test {
         });
         ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
         if let Some(Ok(Message::Text(message))) = ws.next().await {
-            let response: ClientResponse = serde_json::from_str(&message).unwrap();
+            let response: ClientResponseJSON = serde_json::from_str(&message).unwrap();
             match response {
-                ClientResponse::Error(error) => {
+                ClientResponseJSON::Error(error) => {
                     assert_eq!(error.label, 99);
                     assert_eq!(error.key, String::from("test_queue_other"));
                     assert_eq!(error.code, ErrorCode::PermissionDenied);

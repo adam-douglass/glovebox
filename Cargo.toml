@@ -23,6 +23,7 @@ rand = "*"
 confy = "0"
 platform-dirs = "0.3.0"
 base64 = "*"
+anyhow = "*"
 
 tokio = { version = "1", features = ["full"] }
 
@@ -30,6 +31,7 @@ hyper = { version = "0.14", features = ["full"] }
 hyper-tungstenite = "~0"
 tokio-tungstenite = "*"
 routerify = "3"
+http = "*"
 
 bincode = "1"
 serde = {version = "1", features = ["derive"]}

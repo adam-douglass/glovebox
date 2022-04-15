@@ -1,12 +1,13 @@
 use futures::{SinkExt, StreamExt};
+use http::HeaderValue;
 use hyper_tungstenite::tungstenite::Message;
+use hyper_tungstenite::tungstenite::client::IntoClientRequest;
 use log::{info, debug};
 use tokio_tungstenite::connect_async;
 
-use crate::error::Error;
 use crate::priority::entry::Firmness;
-use crate::session::ClientResponse;
-use crate::request::{NotificationName, ClientPost, ClientPop, ClientRequest, ClientRequestJSON};
+use crate::response::ClientResponse;
+use crate::request::{NotificationName, ClientPost, ClientPop, ClientRequest};
 
 
 pub struct SendMessages {
@@ -28,15 +29,19 @@ impl SendMessages {
     pub fn batch(mut self, batch: u64) -> Self { self.batch = batch; self }
     // fn drop(mut self, drop: f32) -> Self { self.drop = drop; self }
 
-    pub fn start(self) -> tokio::task::JoinHandle<Result<f32, Error>> {
+    pub fn start(self) -> tokio::task::JoinHandle<Result<f32, anyhow::Error>> {
         tokio::spawn(send_messages(self.port, self.total, self.batch))
     }
 }
 
-async fn send_messages(port: u16, total: u64, batch_size: u64) -> Result<f32, Error> {
-    let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
-    if let Message::Text(body) = ws.next().await.unwrap()? {
-        let hello: ClientResponse = serde_json::from_str(&body)?;
+async fn send_messages(port: u16, total: u64, batch_size: u64) -> Result<f32, anyhow::Error> {
+
+    let mut request = format!("ws://localhost:{port}/connect/").into_client_request()?;
+    request.headers_mut().append("Binary", HeaderValue::from_str("true")?);
+
+    let (mut ws, _) = connect_async(request).await?;
+    if let Message::Binary(body) = ws.next().await.unwrap()? {
+        let hello: ClientResponse = bincode::deserialize(&body)?;
         if let ClientResponse::Hello(client) = hello {
             info!("Producer connected as {}", client.id);
         }
@@ -60,14 +65,14 @@ async fn send_messages(port: u16, total: u64, batch_size: u64) -> Result<f32, Er
                 notify: vec![NotificationName::Ready, NotificationName::Finish]
             });
             sent.push(label);
-            ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
+            ws.send(Message::Binary(bincode::serialize(&outgoing_message).unwrap())).await.unwrap();
             label += 1;
         }
 
         while sent.len() > 0 {
             let confirm = ws.next().await.unwrap()?;
-            if let Message::Text(body) = confirm {
-                let confirm: ClientResponse = serde_json::from_str(&body)?;
+            if let Message::Binary(body) = confirm {
+                let confirm: ClientResponse = bincode::deserialize(&body)?;
                 if let ClientResponse::Notice(notice) = confirm {
                     if let Some(index) = sent.iter().position(|&i| i == notice.label) {
                         sent.swap_remove(index);
@@ -119,8 +124,8 @@ async fn send_messages(port: u16, total: u64, batch_size: u64) -> Result<f32, Er
 // async fn fetch_messages(port: u16, drop: f32, limit: i32, concurrent: u32) -> Result<FetchResult, Error> {
 //     let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
 //     if let Message::Text(body) = ws.next().await.unwrap()? {
-//         let hello: ClientResponse = serde_json::from_str(&body)?;
-//         if let ClientResponse::Hello(client) = hello {
+//         let hello: ClientResponseJSON = serde_json::from_str(&body)?;
+//         if let ClientResponseJSON::Hello(client) = hello {
 //             info!("Consumer connected as {}", client.id);
 //         }
 //     }
@@ -142,9 +147,9 @@ async fn send_messages(port: u16, total: u64, batch_size: u64) -> Result<f32, Er
 //         }
 //         let confirm = ws.next().await.unwrap()?;
 //         if let Message::Text(body) = confirm {
-//             let confirm: ClientResponse = serde_json::from_str(&body)?;
+//             let confirm: ClientResponseJSON = serde_json::from_str(&body)?;
 //             match confirm  {
-//                 ClientResponse::Message(message) => {
+//                 ClientResponseJSON::Message(message) => {
 //                     assert!(outstanding.remove(&message.label));
 //                     assert_eq!(message.body, b"TEST MESSAGE");
 //                     fetched_count += 1;
@@ -201,15 +206,18 @@ impl PopMessages {
     pub fn concurrent(mut self, concurrent: u64) -> Self { self.concurrent = concurrent; self }
     // fn drop(mut self, drop: f32) -> Self { self.drop = drop; self }
 
-    pub fn start(self) -> tokio::task::JoinHandle<Result<f32, Error>> {
+    pub fn start(self) -> tokio::task::JoinHandle<Result<f32, anyhow::Error>> {
         tokio::spawn(pop_messages(self.port, self.total, self.concurrent))
     }
 }
 
-async fn pop_messages(port: u16, total: u64, concurrent: u64) -> Result<f32, Error> {
-    let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
-    if let Message::Text(body) = ws.next().await.unwrap()? {
-        let hello: ClientResponse = serde_json::from_str(&body)?;
+async fn pop_messages(port: u16, total: u64, concurrent: u64) -> Result<f32, anyhow::Error> {
+    let mut request = format!("ws://localhost:{port}/connect/").into_client_request()?;
+    request.headers_mut().append("Binary", HeaderValue::from_str("true")?);
+
+    let (mut ws, _) = connect_async(request).await?;
+    if let Message::Binary(body) = ws.next().await.unwrap()? {
+        let hello: ClientResponse = bincode::deserialize(&body)?;
         if let ClientResponse::Hello(client) = hello {
             info!("Producer connected as {}", client.id);
         }
@@ -232,12 +240,12 @@ async fn pop_messages(port: u16, total: u64, concurrent: u64) -> Result<f32, Err
                 blocking: true, block_timeout: 30.0 
             });
             label += 1;
-            ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message))?)).await.unwrap();
+            ws.send(Message::Binary(bincode::serialize(&outgoing_message)?)).await.unwrap();
         }
 
         let confirm = ws.next().await.unwrap()?;
-        if let Message::Text(body) = confirm {
-            let confirm: ClientResponse = serde_json::from_str(&body)?;
+        if let Message::Binary(body) = confirm {
+            let confirm: ClientResponse = bincode::deserialize(&body)?;
             match confirm {
                 ClientResponse::Message(_) => {
                     popped += 1;

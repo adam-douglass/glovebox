@@ -6,14 +6,15 @@ mod server;
 mod session;
 mod priority;
 mod config;
-mod test;
+mod response;
 mod request;
+mod test;
 
 use futures::SinkExt;
 use hyper_tungstenite::tungstenite::Message;
 use log::{error, info};
 use error::Error;
-use request::{ClientCreate, ClientRequest, ClientRequestJSON};
+use request::{ClientCreate, ClientRequestJSON};
 use tempdir::TempDir;
 use test::{SendMessages, PopMessages};
 use tokio_tungstenite::connect_async;

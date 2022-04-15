@@ -12,9 +12,10 @@ use tokio::task::JoinHandle;
 use crate::data_journal::file_exists;
 use crate::error::Error;
 use crate::priority::broker::{QueueCommand, AssignParams, PopParams, open_queue, create_queue, FinishParams, QueueStatus};
-use crate::priority::{ClientMessageType, ClientMessage};
+use crate::priority::ClientMessage;
 use crate::priority::entry::{Entry, EntryHeader, NoticeRequest, ClientId, SequenceNo};
 use crate::request::{ClientCreate, NotificationName, ClientPost, ClientFetch, ClientFinish, ClientPop, ClientRequest, ClientRequestJSON};
+use crate::response::{ClientResponse, ClientError, ErrorCode, ClientNotice, ClientResponseJSON, ClientHello};
 use crate::server::run_api;
 use crate::config::{Configuration, QueueConfiguration};
 
@@ -28,89 +29,6 @@ pub enum NotificationMask {
     Finish,
     Retry,
     Drop,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientDelivery {
-    pub label: u64,
-    pub shard: u32,
-    pub sequence: u64,
-    pub body: Vec<u8>,
-    pub finished: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientNotice {
-    pub label: u64,
-    pub notice: NotificationName
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientHello {
-    pub id: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientNoMessage {
-    pub label: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub enum ErrorCode {
-    NoObject,
-    ObjectAlreadyExists,
-    PermissionDenied
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientError {
-    pub label: u64,
-    pub code: ErrorCode,
-    pub key: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag="type")]
-pub enum ClientResponse {
-    Message(ClientDelivery),
-    Notice(ClientNotice),
-    Hello(ClientHello),
-    NoMessage(ClientNoMessage),
-    Error(ClientError),
-}
-
-impl TryFrom<ClientMessage> for ClientResponse {
-    type Error = Error;
-
-    // <ClientResponse as TryFrom<ClientMessage>>::
-    fn try_from(note: ClientMessage) -> Result<ClientResponse, Error> {
-        Ok(match note.notice {
-            ClientMessageType::Ready => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Ready }),
-            ClientMessageType::Write => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Write }),
-            ClientMessageType::Sync => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Sync }),
-            ClientMessageType::Assign => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Assign }),
-            ClientMessageType::Finish => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Finish }),
-            ClientMessageType::Retry => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Retry }),
-            ClientMessageType::Drop => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Drop }),
-            ClientMessageType::SendEntry(entry, finished) => {
-                let body = match std::sync::Arc::try_unwrap(entry.body) {
-                    Ok(body) => body,
-                    Err(err) => err.as_ref().clone(),
-                };
-
-                ClientResponse::Message(ClientDelivery {
-                    label: note.label,
-                    shard: entry.header.shard,
-                    sequence: entry.header.sequence.0,
-                    body: body,
-                    finished,
-                })
-            },
-            ClientMessageType::NoEntry => ClientResponse::NoMessage(ClientNoMessage{
-                label: note.label,
-            })
-        })
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -145,7 +63,7 @@ pub enum QueueStatusResponse {
 }
 
 enum SessionMessage {
-    Connection(HyperWebsocket, Option<ClientId>, bool),
+    Connection(HyperWebsocket, Option<ClientId>, bool, bool),
     GetQueue(String, oneshot::Sender<mpsc::Sender<QueueCommand>>),
     GetConnection(ClientId, oneshot::Sender<mpsc::Sender<SocketMessage>>),
     Stop,
@@ -162,8 +80,8 @@ pub struct SessionClient {
 }
 
 impl SessionClient {
-    pub async fn serve_websocket(&self, socket: HyperWebsocket, client_id: Option<ClientId>, durable_session: bool) -> Result<(), Error> {
-        Ok(self.connection.send(SessionMessage::Connection(socket, client_id, durable_session)).await?)
+    pub async fn serve_websocket(&self, socket: HyperWebsocket, client_id: Option<ClientId>, durable_session: bool, binary: bool) -> Result<(), Error> {
+        Ok(self.connection.send(SessionMessage::Connection(socket, client_id, durable_session, binary)).await?)
     }
 
     pub async fn stop(&self) -> Result<(), Error> {
@@ -373,7 +291,7 @@ impl Session {
 
     async fn process_message(&mut self, message: SessionMessage) -> Result<bool, Error> {
         match message {
-            SessionMessage::Connection(socket, client_id, durable_session) => self.handle_connection(socket, client_id, durable_session).await?,
+            SessionMessage::Connection(socket, client_id, durable_session, binary) => self.handle_connection(socket, client_id, durable_session, binary).await?,
             SessionMessage::Stop => {
                 // Stop gui
                 self.api_handle.abort();
@@ -482,7 +400,7 @@ impl Session {
         return ClientId(id)
     }
 
-    pub async fn handle_connection(&mut self, socket: HyperWebsocket, client_id: Option<ClientId>, durable_session: bool) -> Result<(), Error> {
+    pub async fn handle_connection(&mut self, socket: HyperWebsocket, client_id: Option<ClientId>, durable_session: bool, binary: bool) -> Result<(), Error> {
         let client_id = match client_id {
             Some(client) => {
                 info!("New connection reusing id: {client}");
@@ -503,7 +421,11 @@ impl Session {
             },
         };
 
-        socket.send(Message::Text(serde_json::to_string(&ClientResponse::Hello(ClientHello{id: client_id.0}))?)).await?;
+        if binary {
+            socket.send(Message::Binary(bincode::serialize(&ClientResponse::Hello(ClientHello{id: client_id.0}))?)).await?;
+        } else {
+            socket.send(Message::Text(serde_json::to_string(&ClientResponseJSON::Hello(ClientHello{id: client_id.0}))?)).await?;
+        }
 
         if let Some((sink, _)) = self.connections.get_mut(&client_id) {
             socket = match sink.send(SocketMessage::ResetConnection(socket)).await {
@@ -517,7 +439,7 @@ impl Session {
         }
 
         let (send, recv) = mpsc::channel(32);
-        let worker = tokio::spawn(run_socket(client_id, durable_session, socket, recv, self.client()));
+        let worker = tokio::spawn(run_socket(client_id, durable_session, binary, socket, recv, self.client()));
         self.connections.insert(client_id, (send, worker));
 
         return Ok(())
@@ -534,10 +456,27 @@ impl Session {
 }
 
 
-async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut recv: mpsc::Receiver<SocketMessage>, mut client: SessionClient) {
+async fn run_socket(client_id: ClientId, durable: bool, binary: bool, mut socket: Socket, mut recv: mpsc::Receiver<SocketMessage>, mut client: SessionClient) {
     info!("Launching client minder: {client_id}");
     let mut buffer: VecDeque<Message> = VecDeque::new();
     let mut socket_spoiled = false;
+
+    let encode = if binary {
+        |message: ClientResponse| -> Option<Message> {
+            match bincode::serialize(&message) {
+                Ok(message) => Some(Message::Binary(message)),
+                Err(err) => { error!("Send Error: {err}"); None },
+            }
+        }
+    } else {
+        |message: ClientResponse| -> Option<Message> {
+            match serde_json::to_string(&ClientResponseJSON::from(message)) {
+                Ok(message) => Some(Message::Text(message)),
+                Err(err) => { error!("Send Error: {err}"); None },
+            }
+        }
+    };
+
     loop {
         if socket_spoiled {
             if !durable {
@@ -575,11 +514,9 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                 }
             };
 
-            let message = Message::Text(match serde_json::to_string(&message) {
-                Ok(message) => message,
-                Err(err) => { error!("Send Error: {err}"); continue },
-            });
-            buffer.push_back(message);
+            if let Some(message) = encode(message) {
+                buffer.push_back(message);
+            }
 
         } else {
             tokio::select!{
@@ -603,10 +540,11 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                         }
                     };
 
-                    let message = Message::Text(match serde_json::to_string(&message) {
-                        Ok(message) => message,
-                        Err(err) => { error!("Send Error: {err}"); continue },
-                    });
+                    let message = if let Some(message) = encode(message){
+                        message
+                    } else {
+                        continue
+                    };
 
                     if let Err(_) = socket.send(message.clone()).await {
                         socket_spoiled = true;
@@ -632,18 +570,25 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                         },
                     };
 
-                    let message: Result<ClientRequestJSON, serde_json::Error> = match &message {
-                        Message::Text(text) => serde_json::from_str(text),
-                        Message::Binary(data) => serde_json::from_slice(data),
-                        _ => continue
-                    };
-
-                    let message: ClientRequest = match message {
-                        Ok(message) => message.into(),
-                        Err(err) => {
-                            error!("json error {err:?}");
-                            continue;
+                    let message: ClientRequest = match &message {
+                        Message::Text(text) => {
+                            let message: ClientRequestJSON = match serde_json::from_str(text) {
+                                Ok(message) => message,
+                                Err(err) => {
+                                    error!("json error {err:?}");
+                                    continue;
+                                },
+                            };
+                            message.into()
                         },
+                        Message::Binary(data) => match bincode::deserialize(data) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("bincode error {err:?}");
+                                continue;
+                            }
+                        },
+                        _ => continue
                     };
 
                     debug!("Handling client message for {client_id} {message:?}");
@@ -666,10 +611,11 @@ async fn run_socket(client_id: ClientId, durable: bool, mut socket: Socket, mut 
                             key
                         });
 
-                        let message = Message::Text(match serde_json::to_string(&message) {
-                            Ok(message) => message,
-                            Err(err) => { error!("Send Error: {err}"); continue },
-                        });
+                        let message = if let Some(message) = encode(message){
+                            message
+                        } else {
+                            continue
+                        };
 
                         if let Err(_) = socket.send(message.clone()).await {
                             socket_spoiled = true;

@@ -6,6 +6,8 @@ mod session;
 mod priority;
 mod config;
 mod request;
+mod response;
+#[cfg(test)]
 mod test;
 
 use config::Configuration;
