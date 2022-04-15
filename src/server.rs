@@ -235,8 +235,12 @@ mod test {
             if let Message::Text(body) = confirm {
                 let confirm: ClientResponseJSON = serde_json::from_str(&body)?;
                 if let ClientResponseJSON::Notice(notice) = confirm {
-                    assert!(labels.lock().unwrap().remove(&notice.label));
-                    assert_eq!(notice.notice, NotificationName::Write);
+                    if let NotificationName::Write = notice.notice {
+                        assert!(labels.lock().unwrap().remove(&notice.label));
+                    } else {
+                        assert!(false)
+                    }
+                    
                     count += 1;
                     let _ = free_lock.send(()).await;
                 } else {

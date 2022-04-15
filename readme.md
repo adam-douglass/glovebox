@@ -7,4 +7,4 @@ Main features are message streams that are persisted continuously to disk, feedb
 
 ## Documentation
 
-What documentation there is can be found in the [docs directory](./docs).
+What documentation there is can be found in the [docs directory](./docs/index.md).
