@@ -67,7 +67,7 @@ pub struct EntryHeader {
     pub shard: u32,
     pub length: u32,
     pub location: u64,
-    pub priority: u32,
+    pub priority: i16,
     pub attempts: u32,
     pub sequence: SequenceNo,
     pub notice: NoticeRequest,

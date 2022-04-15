@@ -1224,6 +1224,7 @@ dependencies = [
 name = "turbo-glovebox"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bincode",
  "bitmask-enum",
  "chrono",

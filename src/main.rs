@@ -5,6 +5,8 @@ mod server;
 mod session;
 mod priority;
 mod config;
+mod request;
+mod test;
 
 use config::Configuration;
 use session::Session;

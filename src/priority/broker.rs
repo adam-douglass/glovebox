@@ -130,7 +130,7 @@ pub async fn open_queue(path: PathBuf, client: SessionClient) -> Result<(String,
 
 #[derive(PartialEq, Eq, Clone)]
 pub struct EntryPrefix {
-    pub priority: u32,
+    pub priority: i16,
     pub sequence: SequenceNo,
     pub shard: u32,
 }

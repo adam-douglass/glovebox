@@ -23,8 +23,8 @@ use super::entry::{EntryChange, EntryHeader, Firmness, Assignment, ClientId, Seq
 
 pub struct Shard {
     pub id: u32,
-    max_priority: u32,
-    min_priority: u32,
+    max_priority: i16,
+    min_priority: i16,
     inserted_items: u64,
     inserted_bytes: u64,
     connection: mpsc::Sender<ShardCommand>,
@@ -110,8 +110,8 @@ impl Shard {
         // }
 
         let mut active = vec![];
-        let mut max_priority = 0;
-        let mut min_priority = u32::MAX;
+        let mut max_priority = i16::MIN;
+        let mut min_priority = i16::MAX;
         for (_, entry) in internal.entries.iter() {
             active.push(EntryPrefix {
                 priority: entry.priority,
@@ -149,11 +149,11 @@ impl Shard {
         self.inserted_items < self.entry_limit && self.inserted_bytes < self.size_limit
     }
 
-    pub fn priority_fit(&self, priority: u32) -> i32 {
+    pub fn priority_fit(&self, priority: i16) -> i32 {
         if priority > self.max_priority {
-            (priority - self.max_priority) as i32
+            priority as i32 - self.max_priority as i32
         } else if priority < self.min_priority {
-            -((self.min_priority - priority) as i32)
+            -(self.min_priority as i32 - priority as i32)
         } else {
             0
         }
@@ -315,7 +315,7 @@ impl ShardInternal {
         return Ok(ProcessExitCode::Continue)
     }
 
-    async fn do_reinsert(&mut self, sequence: SequenceNo, priority: u32, assignment: Assignment) -> Result<(), Error> {
+    async fn do_reinsert(&mut self, sequence: SequenceNo, priority: i16, assignment: Assignment) -> Result<(), Error> {
         let change = EntryChange::AssignTimeout(assignment.client, sequence, assignment.expiry);
         let result = self.apply(&change);
         self.meta_journal.append(&change).await?;

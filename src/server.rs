@@ -156,7 +156,8 @@ mod test {
     use crate::error::Error;
     use crate::priority::broker::QueueStatus;
     use crate::priority::entry::Firmness;
-    use crate::session::{Session, ClientRequest, ClientPost, ClientResponse, ClientFetch, ClientFinish, NotificationName, SessionClient, ClientCreate, ErrorCode};
+    use crate::session::{Session, ClientResponse, SessionClient, ErrorCode};
+    use crate::request::{ClientRequest, ClientPost, ClientFetch, ClientFinish, NotificationName, ClientCreate};
     use crate::config::{Configuration, QueueConfiguration};
 
     struct SendMessages {

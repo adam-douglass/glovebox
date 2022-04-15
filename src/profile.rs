@@ -6,264 +6,23 @@ mod server;
 mod session;
 mod priority;
 mod config;
+mod test;
+mod request;
 
 use futures::{SinkExt, StreamExt};
 use hyper_tungstenite::tungstenite::Message;
 use log::{error, info, debug};
 use error::Error;
 use priority::entry::Firmness;
-use session::{ClientResponse, NotificationName, ClientPost, ClientPop};
+use session::ClientResponse;
+use request::{NotificationName, ClientPost, ClientPop, ClientCreate, ClientRequest};
 use tempdir::TempDir;
+use test::{SendMessages, PopMessages};
 use tokio_tungstenite::connect_async;
 
 use crate::config::Configuration;
-use crate::session::{Session, ClientCreate, ClientRequest};
+use crate::session::Session;
 
-
-struct SendMessages {
-    port: u16,
-    total: u64,
-    batch: u64,
-}
-
-impl SendMessages {
-    fn new(port: u16) -> Self {
-        Self {
-            port,
-            total: 100,
-            batch: 1
-        }
-    }
-
-    fn total(mut self, total: u64) -> Self { self.total = total; self }
-    fn batch(mut self, batch: u64) -> Self { self.batch = batch; self }
-    // fn drop(mut self, drop: f32) -> Self { self.drop = drop; self }
-
-    fn start(self) -> tokio::task::JoinHandle<Result<f32, Error>> {
-        tokio::spawn(send_messages(self.port, self.total, self.batch))
-    }
-}
-
-async fn send_messages(port: u16, total: u64, batch_size: u64) -> Result<f32, Error> {
-    let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
-    if let Message::Text(body) = ws.next().await.unwrap()? {
-        let hello: ClientResponse = serde_json::from_str(&body)?;
-        if let ClientResponse::Hello(client) = hello {
-            info!("Producer connected as {}", client.id);
-        }
-    }
-
-    let rounds = total/batch_size;
-    let mut label = 0;
-    let starting_time = std::time::Instant::now();
-
-    for round in 0..rounds {
-        
-        let mut sent = vec![];
-        for item in 0..batch_size {
-            debug!("+{round}/{rounds} {item}/{batch_size}");
-
-            let outgoing_message = ClientRequest::Post(ClientPost{
-                queue: "test_queue".to_owned(),
-                message: b"TEST MESSAGE".to_vec(),
-                priority: 1,
-                label,
-                notify: vec![NotificationName::Ready, NotificationName::Finish]
-            });
-            sent.push(label);
-            ws.send(Message::Text(serde_json::to_string(&outgoing_message).unwrap())).await.unwrap();
-            label += 1;
-        }
-
-        while sent.len() > 0 {
-            let confirm = ws.next().await.unwrap()?;
-            if let Message::Text(body) = confirm {
-                let confirm: ClientResponse = serde_json::from_str(&body)?;
-                if let ClientResponse::Notice(notice) = confirm {
-                    if let Some(index) = sent.iter().position(|&i| i == notice.label) {
-                        sent.swap_remove(index);
-                    }
-                }
-            }
-        }
-    }
-
-    let finish = starting_time.elapsed().as_secs_f32();
-
-    ws.close(None).await?;
-    return Ok(finish);
-}
-
-// struct FetchMessages {
-//     port: u16,
-//     drop: f32,
-//     limit: i32,
-//     concurrent: u32
-// }
-
-// impl FetchMessages {
-//     fn new(port: u16) -> Self {
-//         Self {
-//             port,
-//             drop: 0.0,
-//             limit: 100,
-//             concurrent: 1,
-//         }
-//     }
-
-//     fn limit(mut self, limit: i32) -> Self { self.limit = limit; self }
-//     fn concurrent(mut self, concurrent: u32) -> Self { self.concurrent = concurrent; self }
-//     fn drop(mut self, drop: f32) -> Self { self.drop = drop; self }
-
-//     fn start(self) -> tokio::task::JoinHandle<Result<FetchResult, Error>> {
-//         tokio::spawn(fetch_messages(self.port, self.drop, self.limit, self.concurrent))
-//     }
-// }
-
-// struct FetchResult {
-//     fetches: i32,
-//     drops: i32,
-//     fetched: i32,
-//     finish: i32,
-// }
-
-// async fn fetch_messages(port: u16, drop: f32, limit: i32, concurrent: u32) -> Result<FetchResult, Error> {
-//     let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
-//     if let Message::Text(body) = ws.next().await.unwrap()? {
-//         let hello: ClientResponse = serde_json::from_str(&body)?;
-//         if let ClientResponse::Hello(client) = hello {
-//             info!("Consumer connected as {}", client.id);
-//         }
-//     }
-//     let mut ii = 0;
-//     let mut outstanding = HashSet::new();
-//     let mut drop_count = 0;
-//     let mut fetch_count = 0;
-//     let mut fetched_count = 0;
-//     let mut finish_count = 0;
-//     let queue = String::from("test_queue");
-
-//     while finish_count < limit {
-//         while outstanding.len() < concurrent as usize {
-//             ii += 1;
-//             outstanding.insert(ii);
-//             let outgoing_message = ClientRequest::Fetch(ClientFetch{queue: queue.clone(), label:ii,sync:Firmness::Write, blocking: true, work_timeout: 0.5, block_timeout: 30.0 });
-//             fetch_count += 1;
-//             ws.send(Message::Text(serde_json::to_string(&outgoing_message)?)).await.unwrap();
-//         }
-//         let confirm = ws.next().await.unwrap()?;
-//         if let Message::Text(body) = confirm {
-//             let confirm: ClientResponse = serde_json::from_str(&body)?;
-//             match confirm  {
-//                 ClientResponse::Message(message) => {
-//                     assert!(outstanding.remove(&message.label));
-//                     assert_eq!(message.body, b"TEST MESSAGE");
-//                     fetched_count += 1;
-
-//                     if thread_rng().gen::<f32>() > drop {
-//                         let outgoing_message = ClientRequest::Finish(ClientFinish{
-//                             queue: queue.clone(), 
-//                             shard: message.shard, 
-//                             sequence: message.sequence,
-//                             label: None,
-//                             response: None,
-//                         });
-//                         ws.send(Message::Text(serde_json::to_string(&outgoing_message)?)).await.unwrap();
-//                         finish_count +=1;
-//                         info!("finished {finish_count}");
-//                     } else {
-//                         drop_count += 1;
-//                     }
-//                 }
-//                 _ => {
-
-//                     continue
-//                 }
-//             }
-//         }
-//     }
-//     ws.close(None).await?;
-
-//     return Ok(FetchResult{
-//         fetched: fetched_count,
-//         fetches: fetch_count,
-//         drops: drop_count,
-//         finish: finish_count,
-//     });
-// }
-
-
-struct PopMessages {
-    port: u16,
-    total: u64,
-    concurrent: u64,
-}
-
-impl PopMessages {
-    fn new(port: u16) -> Self {
-        Self {
-            port,
-            total: 100,
-            concurrent: 1
-        }
-    }
-
-    fn total(mut self, total: u64) -> Self { self.total = total; self }
-    fn concurrent(mut self, concurrent: u64) -> Self { self.concurrent = concurrent; self }
-    // fn drop(mut self, drop: f32) -> Self { self.drop = drop; self }
-
-    fn start(self) -> tokio::task::JoinHandle<Result<f32, Error>> {
-        tokio::spawn(pop_messages(self.port, self.total, self.concurrent))
-    }
-}
-
-async fn pop_messages(port: u16, total: u64, concurrent: u64) -> Result<f32, Error> {
-    let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
-    if let Message::Text(body) = ws.next().await.unwrap()? {
-        let hello: ClientResponse = serde_json::from_str(&body)?;
-        if let ClientResponse::Hello(client) = hello {
-            info!("Producer connected as {}", client.id);
-        }
-    }
-
-    let mut popped = 0;
-    let mut outstanding = 0;
-    let mut label = 0;
-    let queue = String::from("test_queue");
-    let starting_time = std::time::Instant::now();
-
-    while popped < total {
-        debug!("-{}/{}", popped, total);
-
-        let to_add = (concurrent - outstanding).min(total - popped);
-        for _ in 0..to_add {
-            outstanding += 1;            
-            let outgoing_message = ClientRequest::Pop(ClientPop{
-                queue: queue.clone(), label, sync:Firmness::Write, 
-                blocking: true, block_timeout: 30.0 
-            });
-            label += 1;
-            ws.send(Message::Text(serde_json::to_string(&outgoing_message)?)).await.unwrap();
-        }
-
-        let confirm = ws.next().await.unwrap()?;
-        if let Message::Text(body) = confirm {
-            let confirm: ClientResponse = serde_json::from_str(&body)?;
-            match confirm {
-                ClientResponse::Message(_) => {
-                    popped += 1;
-                    outstanding -= 1;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let finish = starting_time.elapsed().as_secs_f32();
-
-    ws.close(None).await?;
-    return Ok(finish);
-}
 
 
 #[tokio::main]
@@ -322,3 +81,4 @@ async fn main() -> Result<(), Error>{
     client.stop().await.unwrap();
     return Ok(())
 }
+

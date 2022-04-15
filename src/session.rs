@@ -13,22 +13,11 @@ use crate::data_journal::file_exists;
 use crate::error::Error;
 use crate::priority::broker::{QueueCommand, AssignParams, PopParams, open_queue, create_queue, FinishParams, QueueStatus};
 use crate::priority::{ClientMessageType, ClientMessage};
-use crate::priority::entry::{Firmness, Entry, EntryHeader, NoticeRequest, ClientId, SequenceNo};
+use crate::priority::entry::{Entry, EntryHeader, NoticeRequest, ClientId, SequenceNo};
+use crate::request::{ClientCreate, NotificationName, ClientPost, ClientFetch, ClientFinish, ClientPop, ClientRequest};
 use crate::server::run_api;
 use crate::config::{Configuration, QueueConfiguration};
 
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum NotificationName {
-    Ready,
-    Write,
-    Sync,
-    Assign,
-    Finish,
-    Retry,
-    Drop
-}
 
 #[bitmask_enum::bitmask(u8)]
 pub enum NotificationMask {
@@ -40,112 +29,6 @@ pub enum NotificationMask {
     Retry,
     Drop,
 }
-
-impl From<&NotificationName> for NotificationMask {
-    fn from(value: &NotificationName) -> Self {
-        match value {
-            NotificationName::Ready => NotificationMask::Ready,
-            NotificationName::Write => NotificationMask::Write,
-            NotificationName::Sync => NotificationMask::Sync,
-            NotificationName::Assign => NotificationMask::Assign,
-            NotificationName::Finish => NotificationMask::Finish,
-            NotificationName::Retry => NotificationMask::Retry,
-            NotificationName::Drop => NotificationMask::Drop,
-        }
-    }
-}
-
-
-impl From<&Vec<NotificationName>> for NotificationMask {
-    fn from(fields: &Vec<NotificationName>) -> Self {
-        let mut out: Self = Self::none();
-        for value in fields.iter() {
-            out |= NotificationMask::from(value);
-        }
-        out
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientPost {
-    pub queue: String,
-    pub message: Vec<u8>,
-    pub priority: u32,
-    pub label: u64,
-    pub notify: Vec<NotificationName>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientFetch {
-    pub queue: String,
-    pub blocking: bool,
-    pub block_timeout: f32,
-    pub work_timeout: f32,
-    pub sync: Firmness,
-    pub label: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientFinish {
-    pub queue: String,
-    pub sequence: u64,
-    pub shard: u32,
-    #[serde(default)]
-    pub label: Option<u64>,
-    #[serde(default)]
-    pub response: Option<Firmness>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientPop {
-    pub queue: String,
-    pub sync: Firmness,
-    pub blocking: bool,
-    pub block_timeout: f32,
-    pub label: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ClientCreate {
-    pub queue: String,
-    pub label: u64,
-    pub retries: Option<u32>,
-    pub shard_max_entries: Option<u64>,
-    pub shard_max_bytes: Option<u64>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag="type")]
-pub enum ClientRequest {
-    Post(ClientPost),
-    Fetch(ClientFetch),
-    Finish(ClientFinish),
-    Pop(ClientPop),
-    Create(ClientCreate),
-}
-
-impl ClientRequest {
-    pub fn label(&self) -> u64 {
-        match self {
-            ClientRequest::Post(post) => post.label,
-            ClientRequest::Fetch(fetch) => fetch.label,
-            ClientRequest::Finish(finish) => finish.label.unwrap_or(0),
-            ClientRequest::Pop(pop) => pop.label,
-            ClientRequest::Create(create) => create.label,
-        }
-    }
-
-    pub fn queue(&self) -> String {
-        match self {
-            ClientRequest::Post(post) => post.queue.clone(),
-            ClientRequest::Fetch(fetch) => fetch.queue.clone(),
-            ClientRequest::Finish(finish) => finish.queue.clone(),
-            ClientRequest::Pop(pop) => pop.queue.clone(),
-            ClientRequest::Create(create) => create.queue.clone()
-        }
-    }
-}
-
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ClientDelivery {
