@@ -152,10 +152,9 @@ impl SessionClient {
     pub async fn pop(&mut self, client: ClientId, pop: ClientPop) -> Result<(), Error> {
         let queue = self.fetch_queue(&pop.queue.to_owned()).await?;
         Ok(queue.send(QueueCommand::Pop(PopParams{
-            blocking: pop.blocking,
             client,
             label: pop.label,
-            block_timeout: pop.block_timeout,
+            timeout: pop.timeout,
             sync: pop.sync,
         })).await?)
     }

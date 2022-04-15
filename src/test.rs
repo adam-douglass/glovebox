@@ -237,7 +237,7 @@ async fn pop_messages(port: u16, total: u64, concurrent: u64) -> Result<f32, any
             outstanding += 1;            
             let outgoing_message = ClientRequest::Pop(ClientPop{
                 queue: queue.clone(), label, sync:Firmness::Write, 
-                blocking: true, block_timeout: 30.0 
+                timeout: Some(30.0)
             });
             label += 1;
             ws.send(Message::Binary(bincode::serialize(&outgoing_message)?)).await.unwrap();

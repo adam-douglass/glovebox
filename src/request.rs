@@ -170,8 +170,7 @@ pub struct ClientFinish {
 pub struct ClientPop {
     pub queue: String,
     pub sync: Firmness,
-    pub blocking: bool,
-    pub block_timeout: f32,
+    pub timeout: Option<f32>,
     pub label: u64,
 }
 

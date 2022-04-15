@@ -25,10 +25,9 @@ pub struct AssignParams {
 }
 
 pub struct PopParams {
-    pub blocking: bool,
     pub client: ClientId,
     pub label: u64,
-    pub block_timeout: f32,
+    pub timeout: Option<f32>,
     pub sync: Firmness
 }
 
@@ -288,7 +287,7 @@ impl PriorityQueueInternal {
         while let Some(request) = self.pending_requests.pop_front() {
             match request {
                 PendingRequest::Pop(pop, start) => {
-                    if start.elapsed().as_secs_f32() > pop.block_timeout { 
+                    if start.elapsed().as_secs_f32() > pop.timeout.unwrap_or(0.0) { 
                         self.failed_fetch(pop.client, pop.label).await;
                         continue 
                     }
@@ -373,7 +372,7 @@ impl PriorityQueueInternal {
         while let Some(request) = self.pending_requests.pop_front() {
             match request {
                 PendingRequest::Pop(pop, start) => {
-                    if start.elapsed().as_secs_f32() > pop.block_timeout { 
+                    if start.elapsed().as_secs_f32() > pop.timeout.unwrap_or(0.0) { 
                         self.failed_fetch(pop.client, pop.label).await;
                         continue 
                     }
@@ -477,7 +476,7 @@ impl PriorityQueueInternal {
                     break;
                 },
                 None => {
-                    if pop.blocking {
+                    if pop.timeout.is_some() {
                         // No available entry, enqueue this request
                         self.pending_requests.push_back(PendingRequest::Pop(pop, std::time::Instant::now()));
                     } else {
