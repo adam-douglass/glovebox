@@ -238,7 +238,7 @@ mod test {
                     if let NotificationName::Write = notice.notice {
                         assert!(labels.lock().unwrap().remove(&notice.label));
                     } else {
-                        assert!(false)
+                        panic!("unexpected notice {:?}", notice);
                     }
                     
                     count += 1;
