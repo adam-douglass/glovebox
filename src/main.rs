@@ -15,6 +15,7 @@ use session::Session;
 use error::Error;
 
 
+#[cfg(not(tarpaulin_include))]
 #[tokio::main]
 async fn main() -> Result<(), Error>{
     // Parse configuration
