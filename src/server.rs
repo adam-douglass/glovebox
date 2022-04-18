@@ -419,8 +419,8 @@ mod test {
         assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), producer).await.unwrap().unwrap().unwrap(), 100);
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), consumer).await.unwrap().unwrap().unwrap();
         assert_eq!(result.finish, 100);
-        assert!(result.drops > 10);
-        assert!(result.fetches > 110);
+        assert!(result.drops > 0);
+        assert!(result.fetches > 100);
 
         client.stop().await.unwrap();
     }
