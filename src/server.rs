@@ -310,7 +310,7 @@ mod test {
             while outstanding.len() < concurrent as usize {
                 ii += 1;
                 outstanding.insert(ii);
-                let outgoing_message = ClientRequest::Fetch(ClientFetch{queue: queue.clone(), label:ii,sync:Firmness::Write, blocking: true, work_timeout: 0.5, block_timeout: 30.0 });
+                let outgoing_message = ClientRequest::Fetch(ClientFetch{queue: queue.clone(), label:ii,sync:Firmness::Write, work_timeout: 0.5, block_timeout: Some(30.0) });
                 fetch_count += 1;
                 ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message))?)).await.unwrap();
             }
@@ -534,9 +534,8 @@ mod test {
                 queue: "test_queue".to_owned(), 
                 label: 9,
                 sync: Firmness::Write, 
-                blocking: true, 
                 work_timeout: 0.1, 
-                block_timeout: 5.0 
+                block_timeout: Some(5.0) 
             });
             ws.send(Message::Text(serde_json::to_string(&ClientRequestJSON::from(outgoing_message)).unwrap())).await.unwrap();
         }

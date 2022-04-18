@@ -148,8 +148,7 @@ pub fn default_label() -> u64 { 0 }
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ClientFetch {
     pub queue: String,
-    pub blocking: bool,
-    pub block_timeout: f32,
+    pub block_timeout: Option<f32>,
     pub work_timeout: f32,
     pub sync: Firmness,
     pub label: u64,

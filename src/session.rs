@@ -130,7 +130,6 @@ impl SessionClient {
     pub async fn fetch(&mut self, client: ClientId, post: ClientFetch) -> Result<(), Error> {
         let queue = self.fetch_queue(&post.queue).await?;
         Ok(queue.send(QueueCommand::Assign(AssignParams{
-            blocking: post.blocking,
             client,
             label: post.label,
             work_timeout: post.work_timeout,

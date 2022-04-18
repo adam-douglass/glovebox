@@ -16,10 +16,9 @@ use super::{ClientMessage, ClientMessageType};
 use super::shard::Shard;
 
 pub struct AssignParams {
-    pub blocking: bool,
     pub client: ClientId,
     pub label: u64,
-    pub block_timeout: f32,
+    pub block_timeout: Option<f32>,
     pub work_timeout: f32,
     pub sync: Firmness
 }
@@ -298,7 +297,7 @@ impl PriorityQueueInternal {
                     };
                 },
                 PendingRequest::Assign(assign, start) => {
-                    if start.elapsed().as_secs_f32() > assign.block_timeout { 
+                    if start.elapsed().as_secs_f32() > assign.block_timeout.unwrap_or(0.0) { 
                         self.failed_fetch(assign.client, assign.label).await;
                         continue 
                     }
@@ -382,7 +381,7 @@ impl PriorityQueueInternal {
                     return Ok(())
                 },
                 PendingRequest::Assign(assign, start) => {
-                    if start.elapsed().as_secs_f32() > assign.block_timeout { 
+                    if start.elapsed().as_secs_f32() > assign.block_timeout.unwrap_or(0.0) { 
                         self.failed_fetch(assign.client, assign.label).await;
                         continue 
                     }
@@ -441,7 +440,7 @@ impl PriorityQueueInternal {
                 },
                 None => {
                     // No available entry, enqueue this request
-                    if assign.blocking {
+                    if assign.block_timeout.is_some() {
                         self.pending_requests.push_back(PendingRequest::Assign(assign, std::time::Instant::now()));
                     } else {
                         self.failed_fetch(assign.client, assign.label).await;
