@@ -164,7 +164,6 @@ mod test {
     use tokio::sync::mpsc;
     use tokio_tungstenite::connect_async;
     use futures_util::stream::StreamExt;
-    use crate::error::Error;
     use crate::priority::broker::QueueStatus;
     use crate::priority::entry::Firmness;
     use crate::response::{ClientResponseJSON, ErrorCode};
@@ -192,12 +191,12 @@ mod test {
         fn concurrent(mut self, concurrent: usize) -> Self { self.concurrent = concurrent; self }
         // fn drop(mut self, drop: f32) -> Self { self.drop = drop; self }
 
-        fn start(self) -> tokio::task::JoinHandle<Result<u64, Error>> {
+        fn start(self) -> tokio::task::JoinHandle<anyhow::Result<u64>> {
             tokio::spawn(send_messages(self.port, self.total, self.concurrent))
         }
     }
 
-    async fn send_messages(port: u16, total: u64, concurrent: usize) -> Result<u64, Error> {
+    async fn send_messages(port: u16, total: u64, concurrent: usize) -> anyhow::Result<u64> {
         let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
         if let Message::Text(body) = ws.next().await.unwrap()? {
             let hello: ClientResponseJSON = serde_json::from_str(&body)?;
@@ -278,7 +277,7 @@ mod test {
         fn concurrent(mut self, concurrent: u32) -> Self { self.concurrent = concurrent; self }
         fn drop(mut self, drop: f32) -> Self { self.drop = drop; self }
 
-        fn start(self) -> tokio::task::JoinHandle<Result<FetchResult, Error>> {
+        fn start(self) -> tokio::task::JoinHandle<anyhow::Result<FetchResult>> {
             tokio::spawn(fetch_messages(self.port, self.drop, self.limit, self.concurrent))
         }
     }
@@ -290,7 +289,7 @@ mod test {
         finish: i32,
     }
 
-    async fn fetch_messages(port: u16, drop: f32, limit: i32, concurrent: u32) -> Result<FetchResult, Error> {
+    async fn fetch_messages(port: u16, drop: f32, limit: i32, concurrent: u32) -> anyhow::Result<FetchResult> {
         let (mut ws, _) = connect_async(format!("ws://localhost:{port}/connect/")).await?;
         if let Message::Text(body) = ws.next().await.unwrap()? {
             let hello: ClientResponseJSON = serde_json::from_str(&body)?;

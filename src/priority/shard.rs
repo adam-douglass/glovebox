@@ -11,12 +11,12 @@ use log::{error, debug};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::data_journal::DataJournal;
-use crate::error::Error;
 use crate::operation_journal::OperationJournal;
 use crate::priority::entry::Entry;
+use crate::request::NotificationName;
 use crate::session::{SessionClient, NotificationMask};
 
-use super::{ClientMessage, ClientMessageType};
+use super::ClientMessage;
 use super::broker::{AssignParams, EntryPrefix, PopParams, QueueCommand, FinishParams};
 use super::entry::{EntryChange, EntryHeader, Firmness, Assignment, ClientId, SequenceNo};
 
@@ -40,7 +40,7 @@ enum ProcessExitCode {
 
 impl Shard {
 
-    pub async fn exists(path: &PathBuf, id: u32) -> Result<bool, Error> {
+    pub async fn exists(path: &PathBuf, id: u32) -> anyhow::Result<bool> {
         if OperationJournal::<EntryChange>::exists(path, id).await? {
             return Ok(true)
         }
@@ -50,7 +50,7 @@ impl Shard {
         return Ok(false)
     }
 
-    pub async fn open(client: SessionClient, queue_connection: mpsc::Sender<QueueCommand>, path: PathBuf, id: u32, retry_limit: u32, max_bytes: u64, max_entries: u64) -> Result<(Self, Vec<EntryPrefix>), Error> {
+    pub async fn open(client: SessionClient, queue_connection: mpsc::Sender<QueueCommand>, path: PathBuf, id: u32, retry_limit: u32, max_bytes: u64, max_entries: u64) -> anyhow::Result<(Self, Vec<EntryPrefix>)> {
         let (connection, recv) = mpsc::channel(32);
         let data_journal = DataJournal::open(&path, id).await?;
         let meta_journal = OperationJournal::open(&path, id).await?;
@@ -159,7 +159,7 @@ impl Shard {
         }
     }
 
-    pub async fn insert(&mut self, entry: Entry) -> Result<(), Error> {
+    pub async fn insert(&mut self, entry: Entry) -> anyhow::Result<()> {
         self.min_priority = self.min_priority.min(entry.header.priority);
         self.max_priority = self.max_priority.max(entry.header.priority);
         self.inserted_items += 1;
@@ -167,35 +167,36 @@ impl Shard {
         Ok(self.connection.send(ShardCommand::Insert(entry)).await?)
     }
 
-    pub async fn assign(&self, assign: AssignParams, entry: EntryPrefix) -> Result<(), Error> {
+    pub async fn assign(&self, assign: AssignParams, entry: EntryPrefix) -> anyhow::Result<()> {
         Ok(self.connection.send(ShardCommand::Assign(assign, entry)).await?)
     }
 
-    pub async fn finish(&self, finish: FinishParams) -> Result<(), Error> {
+    pub async fn finish(&self, finish: FinishParams) -> anyhow::Result<()> {
         Ok(self.connection.send(ShardCommand::Finish(finish)).await?)
     }
 
-    pub async fn pop(&self, pop: PopParams, entry: EntryPrefix) -> Result<(), Error> {
+    pub async fn pop(&self, pop: PopParams, entry: EntryPrefix) -> anyhow::Result<()> {
         Ok(self.connection.send(ShardCommand::Pop(pop, entry)).await?)
     }
 
-    pub async fn stop(&self) -> Result<(), Error> {
+    pub async fn stop(&self) -> anyhow::Result<()> {
         let (send, recv) = oneshot::channel();
         self.connection.send(ShardCommand::Stop(send)).await?;
         let _ = recv.await;
         return Ok(())
     }
 
-    pub async fn exhaust_check(&self) -> Result<(), Error> {
+    pub async fn exhaust_check(&self) -> anyhow::Result<()> {
         Ok(self.connection.send(ShardCommand::ExhaustCheck).await?)
     }
 
-    pub async fn retire(&self) -> Result<(), Error> {
+    pub async fn retire(&self) -> anyhow::Result<()> {
         Ok(self.connection.send(ShardCommand::Retire).await?)
     }
 
 }
 
+#[derive(Debug)]
 enum ShardCommand {
     Insert(Entry),
     Assign(AssignParams, EntryPrefix),
@@ -232,7 +233,7 @@ struct ShardInternal {
     meta_journal: OperationJournal<EntryChange>,
     pending_messages: Vec<ClientMessage>,
     syncing_messages: Vec<ClientMessage>,
-    sync_task: oneshot::Receiver<Error>,
+    sync_task: oneshot::Receiver<anyhow::Error>,
     data_cursor: u64,
 
     inserted_entries: u64,
@@ -253,7 +254,7 @@ struct ShardInternal {
 unsafe impl Send for ShardInternal {}
 
 impl ShardInternal {
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(mut self) -> anyhow::Result<()> {
         loop {
             let mut next_timeout = self.process_timeouts().await;
 
@@ -290,7 +291,7 @@ impl ShardInternal {
         return Ok(())
     }
 
-    async fn process_message(&mut self, command: ShardCommand) -> Result<ProcessExitCode, Error> {
+    async fn process_message(&mut self, command: ShardCommand) -> anyhow::Result<ProcessExitCode> {
         match command {
             ShardCommand::Stop(response) => {
                 let _ = self.data_journal.sync().await;
@@ -315,7 +316,7 @@ impl ShardInternal {
         return Ok(ProcessExitCode::Continue)
     }
 
-    async fn do_reinsert(&mut self, sequence: SequenceNo, priority: i16, assignment: Assignment) -> Result<(), Error> {
+    async fn do_reinsert(&mut self, sequence: SequenceNo, priority: i16, assignment: Assignment) -> anyhow::Result<()> {
         let change = EntryChange::AssignTimeout(assignment.client, sequence, assignment.expiry);
         let result = self.apply(&change);
         self.meta_journal.append(&change).await?;
@@ -324,12 +325,9 @@ impl ShardInternal {
 
         if let Some(result) = result {
             debug!("dropping message {:?} after {} retries.", result.sequence, result.attempts);
-            self.sync_events(vec![
-                ClientMessage{ client: assignment.notice.client, label: assignment.notice.label, notice: ClientMessageType::Retry},
-                ClientMessage{ client: assignment.notice.client, label: assignment.notice.label, notice: ClientMessageType::Drop},
-            ]).await;
+            self.sync_event(ClientMessage::note(assignment.notice.client, assignment.notice.label, NotificationName::Drop)).await;
         } else {
-            self.sync_event(ClientMessage{ client: assignment.notice.client, label: assignment.notice.label, notice: ClientMessageType::Retry}).await;
+            self.sync_event(ClientMessage::note(assignment.notice.client, assignment.notice.label, NotificationName::Retry)).await;
             self.queue_connection.send(QueueCommand::ReInsert(EntryPrefix{ 
                 priority, 
                 sequence, 
@@ -339,7 +337,7 @@ impl ShardInternal {
         return Ok(())
     }
 
-    async fn do_insert(&mut self, entry: Entry) -> Result<(), Error> {
+    async fn do_insert(&mut self, entry: Entry) -> anyhow::Result<()> {
         let Entry {mut header, body} = entry;
         header.location = self.data_cursor;
 
@@ -360,7 +358,7 @@ impl ShardInternal {
             Ok(index) => {
                 if let EntryChange::New(entry, _) = change {
                     if entry.location != index {
-                        return Err(Error::ShardIndexDesync(entry.location, index))
+                        return Err(crate::error::Error::ShardIndexDesync(entry.location, index).into())
                     }
                 }
             },
@@ -387,7 +385,7 @@ impl ShardInternal {
         return Ok(())
     }
 
-    async fn do_assign(&mut self, params: AssignParams, prefix: EntryPrefix) -> Result<(), Error> {
+    async fn do_assign(&mut self, params: AssignParams, prefix: EntryPrefix) -> anyhow::Result<()> {
         let timeout = if params.work_timeout > 0.0 {
             chrono::Duration::milliseconds((1000.0 * params.work_timeout) as i64)
         } else {
@@ -415,12 +413,12 @@ impl ShardInternal {
 
         match params.sync {
             Firmness::Ready => {
-                self.client.send_client(ClientMessage{ client: params.client, label: params.label, notice: ClientMessageType::SendEntry(entry, false) }).await?;
+                self.client.send_client(ClientMessage{ client: params.client, label: params.label, notice: ClientMessageType::SendEntry(entry, false) }).await;
                 self.meta_journal.append(&change).await?;
             },
             Firmness::Write => {
                 self.meta_journal.append(&change).await?;
-                self.client.send_client(ClientMessage{ client: params.client, label: params.label, notice: ClientMessageType::SendEntry(entry, false) }).await?;
+                self.client.send_client(ClientMessage{ client: params.client, label: params.label, notice: ClientMessageType::SendEntry(entry, false) }).await;
             },
             Firmness::Sync => {
                 self.meta_journal.append(&change).await?;
@@ -435,7 +433,7 @@ impl ShardInternal {
         return Ok(())
     }
 
-    async fn do_finish(&mut self, params: FinishParams) -> Result<(), Error> {
+    async fn do_finish(&mut self, params: FinishParams) -> anyhow::Result<()> {
         let FinishParams{client, sequence, response, label} = params;
         let change = EntryChange::Finish(client, sequence);
         let note = match self.apply(&change) {
@@ -484,7 +482,7 @@ impl ShardInternal {
         return Ok(())
     }
 
-    async fn do_pop(&mut self, pop: PopParams, prefix: EntryPrefix) -> Result<(), Error> {
+    async fn do_pop(&mut self, pop: PopParams, prefix: EntryPrefix) -> anyhow::Result<()> {
         let change = EntryChange::Pop(prefix.sequence);
         let header = match self.apply(&change) {
             Some(header) => header,
@@ -645,11 +643,11 @@ impl ShardInternal {
         tokio::spawn(async move {
             let (m, j) = tokio::join!(m.sync_data(), j.sync_data());
             if let Err(err) = m {
-                let _ = guard.send(Error::from(err));
+                let _ = guard.send(anyhow::Error::from(err));
                 return
             }
             if let Err(err) = j {
-                let _ = guard.send(Error::from(err));
+                let _ = guard.send(anyhow::Error::from(err));
             }
         });
     }

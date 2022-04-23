@@ -33,13 +33,13 @@ pub struct DataJournal {
     journal_path: PathBuf,
 }
 
-pub async fn file_exists(path: &PathBuf) -> Result<bool, Error> {
+pub async fn file_exists(path: &PathBuf) -> anyhow::Result<bool> {
     match tokio::fs::metadata(path).await {
         Ok(_) => Ok(true),
         Err(err) => if let std::io::ErrorKind::NotFound = err.kind() {
             Ok(false)
         } else {
-            Err(Error::from(err))
+            Err(anyhow::Error::from(err))
         },
     }
 }
@@ -47,19 +47,19 @@ pub async fn file_exists(path: &PathBuf) -> Result<bool, Error> {
 
 impl DataJournal {
 
-    pub async fn exists(path: &Path, id: u32) -> Result<bool, Error> {
+    pub async fn exists(path: &Path, id: u32) -> anyhow::Result<bool> {
         let path = path.join(id.to_string() + "_data");
         file_exists(&path).await
     }
 
-    pub async fn erase(mut self) -> Result<(), Error> {
+    pub async fn erase(mut self) -> anyhow::Result<()> {
         let _ = self.journal.flush().await;
         drop(self.journal);
         tokio::fs::remove_file(self.journal_path).await?;
         Ok(())
     }
 
-    pub async fn open(path: &Path, id: u32) -> Result<Self, Error> {
+    pub async fn open(path: &Path, id: u32) -> anyhow::Result<Self> {
         let path = path.join(id.to_string() + "_data");
         let existing_journal = file_exists(&path).await?;
         let mut journal = tokio::fs::OpenOptions::new()
@@ -85,7 +85,7 @@ impl DataJournal {
             let header = header_data.current();
             
             if header.id != id {
-                return Err(Error::JournalHeaderIdError(path, header.id, id))
+                return Err(Error::JournalHeaderIdError(path, header.id, id).into())
             }
 
             header_size
@@ -100,28 +100,28 @@ impl DataJournal {
         Ok(Self {journal, header_size, journal_path: path})
     }
 
-    pub async fn append(&mut self, data: &Vec<u8>) -> Result<u64, Error> {
+    pub async fn append(&mut self, data: &Vec<u8>) -> anyhow::Result<u64> {
         let index = self.journal.seek(SeekFrom::End(0)).await?;
         self.journal.write_u32_le(data.len() as u32).await?;
         self.journal.write_all(&data).await?;
         Ok(index)
     }
 
-    pub async fn read(&mut self, location: u64) -> Result<Vec<u8>, Error> {
+    pub async fn read(&mut self, location: u64) -> anyhow::Result<Vec<u8>> {
         let index = self.journal.seek(SeekFrom::Start(location)).await?;
         if index != location {
-            return Err(Error::ReadPastEnd)
+            return Err(Error::ReadPastEnd.into())
         }
         let size = self.journal.read_u32_le().await? as usize;
         let mut buffer = vec![0; size];
         let result = self.journal.read_exact(&mut buffer).await?;
         if result != size {
-            return Err(Error::ReadPastEnd)
+            return Err(Error::ReadPastEnd.into())
         }
         return Ok(buffer)
     }
 
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&mut self) -> anyhow::Result<()> {
         Ok(self.journal.sync_all().await?)
     }
 
@@ -141,16 +141,16 @@ impl DataJournal {
     //     });
     // }
 
-    // pub async fn check_last(&mut self, location: u64) -> Result<(), Error> {
+    // pub async fn check_last(&mut self, location: u64) -> anyhow::Result<()> {
     //     self.read(location).await?;
     //     Ok(())
     // }
 
-    pub async fn size(&mut self) -> Result<u64, Error> {
+    pub async fn size(&mut self) -> anyhow::Result<u64> {
         Ok(self.journal.seek(SeekFrom::End(0)).await?)
     }
 
-    pub async fn truncate(&mut self, size: u64) -> Result<(), Error> {
+    pub async fn truncate(&mut self, size: u64) -> anyhow::Result<()> {
         Ok(self.journal.set_len(size).await?)
     }
 }

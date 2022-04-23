@@ -12,12 +12,11 @@ mod test;
 
 use config::Configuration;
 use session::Session;
-use error::Error;
 
 
 #[cfg(not(tarpaulin_include))]
 #[tokio::main]
-async fn main() -> Result<(), Error>{
+async fn main() -> anyhow::Result<()>{
     // Parse configuration
     let config: Configuration = confy::load("glovebox")?;
     tokio::fs::create_dir_all(&config.data_path).await?;

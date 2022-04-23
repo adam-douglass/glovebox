@@ -13,7 +13,6 @@ mod test;
 use futures::SinkExt;
 use hyper_tungstenite::tungstenite::Message;
 use log::{error, info};
-use error::Error;
 use request::{ClientCreate, ClientRequestJSON};
 use tempdir::TempDir;
 use test::{SendMessages, PopMessages};
@@ -25,7 +24,7 @@ use crate::session::Session;
 
 
 #[tokio::main]
-async fn main() -> Result<(), Error>{
+async fn main() -> anyhow::Result<()> {
     env_logger::init();
     // Launch the server
     

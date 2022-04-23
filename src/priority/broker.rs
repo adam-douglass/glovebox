@@ -9,12 +9,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
 use crate::config::QueueConfiguration;
-use crate::error::Error;
 use crate::session::{SessionClient, NotificationMask, QueueStatusResponse};
 use super::entry::{Entry, Firmness, ClientId, SequenceNo};
 use super::{ClientMessage, ClientMessageType};
 use super::shard::Shard;
 
+#[derive(Debug)]
 pub struct AssignParams {
     pub client: ClientId,
     pub label: u64,
@@ -23,6 +23,7 @@ pub struct AssignParams {
     pub sync: Firmness
 }
 
+#[derive(Debug)]
 pub struct PopParams {
     pub client: ClientId,
     pub label: u64,
@@ -30,7 +31,7 @@ pub struct PopParams {
     pub sync: Firmness
 }
 
-
+#[derive(Debug)]
 pub struct FinishParams {
     pub client: ClientId, 
     pub sequence: SequenceNo,
@@ -47,6 +48,7 @@ pub struct QueueStatus {
     pub shards_finished: u64,
 }
 
+#[derive(Debug)]
 pub enum QueueCommand {
     Insert(Entry),
     Assign(AssignParams),
@@ -81,7 +83,7 @@ impl QueueHeaderFileData {
     }
 }
 
-pub async fn create_queue(path: &PathBuf, client: SessionClient, config: QueueConfiguration) -> Result<(String, PriorityQueue), Error> {
+pub async fn create_queue(path: &PathBuf, client: SessionClient, config: QueueConfiguration) -> anyhow::Result<(String, PriorityQueue)> {
     let id = uuid::Uuid::new_v4().to_string();
     let path = path.join(&id);
     tokio::fs::DirBuilder::new()
@@ -98,7 +100,7 @@ pub async fn create_queue(path: &PathBuf, client: SessionClient, config: QueueCo
     return open_queue(path, client).await
 }
 
-pub async fn open_queue(path: PathBuf, client: SessionClient) -> Result<(String, PriorityQueue), Error> {
+pub async fn open_queue(path: PathBuf, client: SessionClient) -> anyhow::Result<(String, PriorityQueue)> {
     let (command_sink, command_source) = mpsc::channel(128);
 
     let header = tokio::fs::read(path.join("header")).await?;
@@ -126,7 +128,7 @@ pub async fn open_queue(path: PathBuf, client: SessionClient) -> Result<(String,
 }
 
 
-#[derive(PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct EntryPrefix {
     pub priority: i16,
     pub sequence: SequenceNo,
@@ -171,7 +173,7 @@ struct PriorityQueueInternal {
 }
 
 impl PriorityQueueInternal {
-    async fn load_shards(&mut self) -> Result<(), Error> {
+    async fn load_shards(&mut self) -> anyhow::Result<()> {
         let mut dir_listing = tokio::fs::read_dir(&self.path).await?;
         let mut loading = vec![];
         while let Some(entry) = dir_listing.next_entry().await? {
@@ -248,7 +250,7 @@ impl PriorityQueueInternal {
         }
     }
 
-    async fn process_message(&mut self, message: QueueCommand) -> Result<bool, Error> {
+    async fn process_message(&mut self, message: QueueCommand) -> anyhow::Result<bool> {
         match message {
             QueueCommand::Stop(signal) => {
                 let mut out = vec![];
@@ -276,7 +278,7 @@ impl PriorityQueueInternal {
         return Ok(false)
     }
     
-    async fn do_insert(&mut self, mut entry: Entry) -> Result<(), Error> {
+    async fn do_insert(&mut self, mut entry: Entry) -> anyhow::Result<()> {
         // Assign a sequence number to entry
         entry.header.sequence = SequenceNo(self.sequence_counter);
         self.sequence_counter += 1;
@@ -366,7 +368,7 @@ impl PriorityQueueInternal {
         return Ok(())
     }
 
-    async fn do_reinsert(&mut self, reinsert: EntryPrefix) -> Result<(), Error> {
+    async fn do_reinsert(&mut self, reinsert: EntryPrefix) -> anyhow::Result<()> {
         // See if there is a pending request to process
         while let Some(request) = self.pending_requests.pop_front() {
             match request {
@@ -397,7 +399,7 @@ impl PriorityQueueInternal {
         return Ok(())
     }
 
-    async fn do_status(&mut self, response: oneshot::Sender<QueueStatusResponse>) -> Result<(), Error> {
+    async fn do_status(&mut self, response: oneshot::Sender<QueueStatusResponse>) -> anyhow::Result<()> {
         let _ = response.send(QueueStatusResponse::Status(QueueStatus{
             length: self.available.len() as u64,
             readers_waiting: self.pending_requests.len() as u64,
@@ -426,7 +428,7 @@ impl PriorityQueueInternal {
         }
     }
 
-    async fn do_assign(&mut self, assign: AssignParams) -> Result<(), Error> {
+    async fn do_assign(&mut self, assign: AssignParams) -> anyhow::Result<()> {
         loop {
             match self.pop_first() {
                 Some(entry) => {
@@ -452,7 +454,7 @@ impl PriorityQueueInternal {
         return Ok(())
     }
 
-    async fn do_finish(&mut self, shard: u32, params: FinishParams) -> Result<(), Error> {
+    async fn do_finish(&mut self, shard: u32, params: FinishParams) -> anyhow::Result<()> {
         match self.get_shard(shard) {
             Some(shard) => {
                 shard.finish(params).await?;
@@ -462,7 +464,7 @@ impl PriorityQueueInternal {
         }
     }
 
-    async fn do_pop(&mut self, pop: PopParams) -> Result<(), Error> {
+    async fn do_pop(&mut self, pop: PopParams) -> anyhow::Result<()> {
         loop {
             match self.pop_first() {
                 Some(entry) => {
@@ -488,7 +490,7 @@ impl PriorityQueueInternal {
         return Ok(())
     }
 
-    async fn do_direct_pop(&mut self, pop: &PopParams, entry: Entry) -> Result<Option<Entry>, Error> {
+    async fn do_direct_pop(&mut self, pop: &PopParams, entry: Entry) -> anyhow::Result<Option<Entry>> {
         let notice = entry.header.notice;
         debug!("Direct pop {}", notice.label);
 
@@ -527,7 +529,7 @@ impl PriorityQueueInternal {
         }
     }
 
-    async fn create_shard<'a>(&'a mut self) -> Result<&'a mut Shard, Error> {
+    async fn create_shard<'a>(&'a mut self) -> anyhow::Result<&'a mut Shard> {
         loop {
             let id: u32 = rand::thread_rng().gen();
 
@@ -560,14 +562,14 @@ impl PriorityQueueInternal {
         }).await;
     }
 
-    async fn cleanup(&self) -> Result<(), Error> {
+    async fn cleanup(&self) -> anyhow::Result<()> {
         for (_, shard) in self.ro_shards.iter() {
             shard.exhaust_check().await?
         }
         return Ok(())
     }
 
-    async fn retire_shard(&mut self, id: u32) -> Result<(), Error> {
+    async fn retire_shard(&mut self, id: u32) -> anyhow::Result<()> {
         if let Some(shard) = self.ro_shards.remove(&id) {
             self.shards_finished += 1;
             shard.retire().await?;

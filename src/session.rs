@@ -62,6 +62,7 @@ pub enum QueueStatusResponse {
     Status(QueueStatus)
 }
 
+#[derive(Debug)]
 enum SessionMessage {
     Connection(HyperWebsocket, Option<ClientId>, bool, bool),
     GetQueue(String, oneshot::Sender<mpsc::Sender<QueueCommand>>),
@@ -80,16 +81,16 @@ pub struct SessionClient {
 }
 
 impl SessionClient {
-    pub async fn serve_websocket(&self, socket: HyperWebsocket, client_id: Option<ClientId>, durable_session: bool, binary: bool) -> Result<(), Error> {
+    pub async fn serve_websocket(&self, socket: HyperWebsocket, client_id: Option<ClientId>, durable_session: bool, binary: bool) -> anyhow::Result<()> {
         Ok(self.connection.send(SessionMessage::Connection(socket, client_id, durable_session, binary)).await?)
     }
 
-    pub async fn stop(&self) -> Result<(), Error> {
+    pub async fn stop(&self) -> anyhow::Result<()> {
         self.connection.send(SessionMessage::Stop).await?;
         Ok(self.connection.closed().await)
     }
 
-    async fn fetch_queue<'a>(&'a mut self, name: &String) -> Result<&'a mpsc::Sender<QueueCommand>, Error> {
+    async fn fetch_queue<'a>(&'a mut self, name: &String) -> anyhow::Result<&'a mpsc::Sender<QueueCommand>> {
         if !self.queue_cache.contains_key(name) {
             let (send, recv) = oneshot::channel();
             self.connection.send(SessionMessage::GetQueue(name.to_owned(), send)).await?;
@@ -98,7 +99,7 @@ impl SessionClient {
         return Ok(self.queue_cache.get(name).unwrap())
     }
 
-    async fn fetch_client<'a>(&'a mut self, id: ClientId) -> Result<&'a mpsc::Sender<SocketMessage>, Error> {
+    async fn fetch_client<'a>(&'a mut self, id: ClientId) -> anyhow::Result<&'a mpsc::Sender<SocketMessage>> {
         if !self.client_cache.contains_key(&id) {
             let (send, recv) = oneshot::channel();
             self.connection.send(SessionMessage::GetConnection(id, send)).await?;
@@ -107,7 +108,7 @@ impl SessionClient {
         return Ok(self.client_cache.get(&id).unwrap())
     }
 
-    pub async fn post(&mut self, client: ClientId, post: ClientPost) -> Result<(), Error> {
+    pub async fn post(&mut self, client: ClientId, post: ClientPost) -> anyhow::Result<()> {
         let queue = self.fetch_queue(&post.queue.to_owned()).await?;
         Ok(queue.send(QueueCommand::Insert(Entry {
             header: EntryHeader {
@@ -127,7 +128,7 @@ impl SessionClient {
         })).await?)
     }
 
-    pub async fn fetch(&mut self, client: ClientId, post: ClientFetch) -> Result<(), Error> {
+    pub async fn fetch(&mut self, client: ClientId, post: ClientFetch) -> anyhow::Result<()> {
         let queue = self.fetch_queue(&post.queue).await?;
         Ok(queue.send(QueueCommand::Assign(AssignParams{
             client,
@@ -138,7 +139,7 @@ impl SessionClient {
         })).await?)
     }
 
-    pub async fn finish(&mut self, client: ClientId, finish: ClientFinish) -> Result<(), Error> {
+    pub async fn finish(&mut self, client: ClientId, finish: ClientFinish) -> anyhow::Result<()> {
         let queue = self.fetch_queue(&finish.queue.to_owned()).await?;
         Ok(queue.send(QueueCommand::Finish(FinishParams{
             client,
@@ -148,7 +149,7 @@ impl SessionClient {
         }, finish.shard)).await?)
     }
 
-    pub async fn pop(&mut self, client: ClientId, pop: ClientPop) -> Result<(), Error> {
+    pub async fn pop(&mut self, client: ClientId, pop: ClientPop) -> anyhow::Result<()> {
         let queue = self.fetch_queue(&pop.queue.to_owned()).await?;
         Ok(queue.send(QueueCommand::Pop(PopParams{
             client,
@@ -158,24 +159,43 @@ impl SessionClient {
         })).await?)
     }
 
-    pub async fn create(&mut self, client: ClientId, pop: ClientCreate) -> Result<(), Error> {
+    pub async fn create(&mut self, client: ClientId, pop: ClientCreate) -> anyhow::Result<()> {
         self.connection.send(SessionMessage::CreateQueue(client, pop)).await?;
         return Ok(())
     }
 
-    pub async fn send_client(&mut self, message: crate::priority::ClientMessage) -> Result<Option<crate::priority::ClientMessage>, Error> {
-        let socket = self.fetch_client(message.client).await?;
+    pub async fn notify_client(&mut self, client: ClientId, ) -> anyhow::Result<()> {
+        let socket = match self.fetch_client(message.client).await {
+            Ok(socket) => socket,
+            Err(_) => return SendResult::Failure(message),
+        };
         match socket.send(SocketMessage::OutgoingMessage(message)).await {
             Ok(_) => Ok(None),
             Err(error) => if let SocketMessage::OutgoingMessage(message) = error.0 {
                 Ok(Some(message))
             } else {
-                Err(Error::from(error))
+                Err(error.into())
             },
         }
     }
 
-    pub async fn get_queue_status(&self, queue_name: String) -> Result<QueueStatusResponse, Error> {
+
+    // pub async fn send_client(&mut self, message: crate::priority::ClientMessage) -> SendResult<crate::priority::ClientMessage> {
+    //     let socket = match self.fetch_client(message.client).await {
+    //         Ok(socket) => socket,
+    //         Err(_) => return SendResult::Failure(message),
+    //     };
+    //     match socket.send(SocketMessage::OutgoingMessage(message)).await {
+    //         Ok(_) => Ok(None),
+    //         Err(error) => if let SocketMessage::OutgoingMessage(message) = error.0 {
+    //             Ok(Some(message))
+    //         } else {
+    //             Err(error.into())
+    //         },
+    //     }
+    // }
+
+    pub async fn get_queue_status(&self, queue_name: String) -> anyhow::Result<QueueStatusResponse> {
         let (send, recv) = oneshot::channel();
         self.connection.send(SessionMessage::GetQueueStatus(queue_name, send)).await?;
         return Ok(recv.await?);
@@ -183,11 +203,16 @@ impl SessionClient {
 }
 
 type Socket = WebSocketStream<hyper::upgrade::Upgraded>;
+#[derive(Debug)]
 enum SocketMessage {
     ResetConnection(Socket),
     OutgoingMessage(ClientMessage),
     PreparedMessage(ClientResponse),
     Stop
+}
+
+impl From<ClientResponse> for SocketMessage {
+    fn from(resp: ClientResponse) -> Self { Self::PreparedMessage(resp) }
 }
 
 pub struct Session {
@@ -200,7 +225,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn open(config: Configuration) -> Result<Self, Error> {
+    pub async fn open(config: Configuration) -> anyhow::Result<Self> {
         let (command_sink, command_source) = mpsc::channel(128);
         // let (outgoing_sink, outgoing_source) = mpsc::channel(128);
         let config = Arc::new(config);
@@ -228,7 +253,7 @@ impl Session {
         return Ok(session)
     }
 
-    async fn load_queues(&mut self) -> Result<(), Error> {
+    async fn load_queues(&mut self) -> anyhow::Result<()> {
         let mut dir_listing = tokio::fs::read_dir(&self.config.data_path).await?;
         while let Some(entry) = dir_listing.next_entry().await? {
             if !entry.file_type().await?.is_dir() { continue }
@@ -262,7 +287,7 @@ impl Session {
         return Ok(())
     }
 
-    pub async fn run(&mut self) -> Result<(), Error> {
+    pub async fn run(&mut self) -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 message = self.command_source.recv() => {
@@ -287,7 +312,7 @@ impl Session {
         return Ok(())
     }
 
-    async fn process_message(&mut self, message: SessionMessage) -> Result<bool, Error> {
+    async fn process_message(&mut self, message: SessionMessage) -> anyhow::Result<bool> {
         match message {
             SessionMessage::Connection(socket, client_id, durable_session, binary) => self.handle_connection(socket, client_id, durable_session, binary).await?,
             SessionMessage::Stop => {
@@ -398,7 +423,7 @@ impl Session {
         return ClientId(id)
     }
 
-    pub async fn handle_connection(&mut self, socket: HyperWebsocket, client_id: Option<ClientId>, durable_session: bool, binary: bool) -> Result<(), Error> {
+    pub async fn handle_connection(&mut self, socket: HyperWebsocket, client_id: Option<ClientId>, durable_session: bool, binary: bool) -> anyhow::Result<()> {
         let client_id = match client_id {
             Some(client) => {
                 info!("New connection reusing id: {client}");

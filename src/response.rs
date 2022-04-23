@@ -1,7 +1,7 @@
 use serde::{Serialize, Deserialize};
 
-use crate::error::Error;
-use crate::priority::{ClientMessage, ClientMessageType};
+// use crate::error::Error;
+// use crate::priority::{ClientMessage, ClientMessageType};
 use crate::request::{NotificationName, MessageJSON, message_encoder};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -99,39 +99,39 @@ pub enum ClientResponse {
     Error(ClientError),
 }
 
-impl TryFrom<ClientMessage> for ClientResponse {
-    type Error = Error;
+// impl TryFrom<ClientMessage> for ClientResponse {
+//     type Error = Error;
 
-    // <ClientResponse as TryFrom<ClientMessage>>::
-    fn try_from(note: ClientMessage) -> Result<ClientResponse, Error> {
-        Ok(match note.notice {
-            ClientMessageType::Ready => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Ready }),
-            ClientMessageType::Write => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Write }),
-            ClientMessageType::Sync => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Sync }),
-            ClientMessageType::Assign => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Assign }),
-            ClientMessageType::Finish => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Finish }),
-            ClientMessageType::Retry => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Retry }),
-            ClientMessageType::Drop => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Drop }),
-            ClientMessageType::SendEntry(entry, finished) => {
-                let body = match std::sync::Arc::try_unwrap(entry.body) {
-                    Ok(body) => body,
-                    Err(err) => err.as_ref().clone(),
-                };
+//     // <ClientResponse as TryFrom<ClientMessage>>::
+//     fn try_from(note: ClientMessage) -> Result<ClientResponse, Error> {
+//         Ok(match note.notice {
+//             ClientMessageType::Ready => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Ready }),
+//             ClientMessageType::Write => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Write }),
+//             ClientMessageType::Sync => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Sync }),
+//             ClientMessageType::Assign => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Assign }),
+//             ClientMessageType::Finish => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Finish }),
+//             ClientMessageType::Retry => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Retry }),
+//             ClientMessageType::Drop => ClientResponse::Notice(ClientNotice{ label: note.label, notice: NotificationName::Drop }),
+//             ClientMessageType::SendEntry(entry, finished) => {
+//                 let body = match std::sync::Arc::try_unwrap(entry.body) {
+//                     Ok(body) => body,
+//                     Err(err) => err.as_ref().clone(),
+//                 };
 
-                ClientResponse::Message(ClientDelivery {
-                    label: note.label,
-                    shard: entry.header.shard,
-                    sequence: entry.header.sequence.0,
-                    body: body,
-                    finished,
-                })
-            },
-            ClientMessageType::NoEntry => ClientResponse::NoMessage(ClientNoMessage{
-                label: note.label,
-            })
-        })
-    }
-}
+//                 ClientResponse::Message(ClientDelivery {
+//                     label: note.label,
+//                     shard: entry.header.shard,
+//                     sequence: entry.header.sequence.0,
+//                     body: body,
+//                     finished,
+//                 })
+//             },
+//             ClientMessageType::NoEntry => ClientResponse::NoMessage(ClientNoMessage{
+//                 label: note.label,
+//             })
+//         })
+//     }
+// }
 
 impl From<ClientResponse> for ClientResponseJSON {
     fn from(resp: ClientResponse) -> Self {
