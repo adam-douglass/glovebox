@@ -10,7 +10,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::data_journal::file_exists;
-use crate::error::Error;
 use crate::priority::broker::{QueueCommand, AssignParams, PopParams, open_queue, create_queue, FinishParams, QueueStatus};
 use crate::priority::ClientMessage;
 use crate::priority::entry::{Entry, EntryHeader, NoticeRequest, ClientId, SequenceNo};
@@ -164,21 +163,36 @@ impl SessionClient {
         return Ok(())
     }
 
-    pub async fn notify_client(&mut self, client: ClientId, ) -> anyhow::Result<()> {
-        let socket = match self.fetch_client(message.client).await {
-            Ok(socket) => socket,
-            Err(_) => return SendResult::Failure(message),
-        };
-        match socket.send(SocketMessage::OutgoingMessage(message)).await {
-            Ok(_) => Ok(None),
-            Err(error) => if let SocketMessage::OutgoingMessage(message) = error.0 {
-                Ok(Some(message))
-            } else {
-                Err(error.into())
-            },
-        }
+    // pub async fn notify_client(&mut self, client: ClientId, ) -> anyhow::Result<()> {
+    //     let socket = match self.fetch_client(message.client).await {
+    //         Ok(socket) => socket,
+    //         Err(_) => return SendResult::Failure(message),
+    //     };
+    //     match socket.send(SocketMessage::OutgoingMessage(message)).await {
+    //         Ok(_) => Ok(None),
+    //         Err(error) => if let SocketMessage::OutgoingMessage(message) = error.0 {
+    //             Ok(Some(message))
+    //         } else {
+    //             Err(error.into())
+    //         },
+    //     }
+    // }
+
+    // pub async fn client_message(&mut self, message: crate::priority::ClientMessage) -> SendResult<crate::priority::ClientMessage> {
+    //     todo!()
+    // }
+
+    pub async fn notify_client(&mut self, client: ClientId, label: u64, notice: NotificationName) {
+        let _ = self.message_client(crate::priority::ClientMessage::note(client, label, notice)).await;
     }
 
+    pub async fn message_client(&mut self, message: crate::priority::ClientMessage) -> anyhow::Result<()> {
+        let socket = self.fetch_client(message.client).await?;
+        if let Err(_) = socket.send(SocketMessage::OutgoingMessage(message)).await {
+            return Err(crate::error::Error::SendError.into())
+        }
+        return Ok(())
+    }
 
     // pub async fn send_client(&mut self, message: crate::priority::ClientMessage) -> SendResult<crate::priority::ClientMessage> {
     //     let socket = match self.fetch_client(message.client).await {
@@ -481,7 +495,7 @@ impl Session {
 
 
 async fn run_socket(client_id: ClientId, durable: bool, binary: bool, mut socket: Socket, mut recv: mpsc::Receiver<SocketMessage>, mut client: SessionClient) {
-    info!("Launching client minder: {client_id}");
+    info!("Launching client minder: {client_id} durable: {durable} binary: {binary}");
     let mut buffer: VecDeque<Message> = VecDeque::new();
     let mut socket_spoiled = false;
 
@@ -528,10 +542,11 @@ async fn run_socket(client_id: ClientId, durable: bool, binary: bool, mut socket
                     continue
                 },
                 SocketMessage::OutgoingMessage(message) => {
-                    match ClientResponse::try_from(message){
-                        Ok(message) => message,
-                        Err(err) => { error!("Send Encode Error: {err}"); continue; },
-                    }
+                    message.message
+                    // match ClientResponse::try_from(message){
+                    //     Ok(message) => message,
+                    //     Err(err) => { error!("Send Encode Error: {err}"); continue; },
+                    // }
                 },
                 SocketMessage::PreparedMessage(message) => {
                     message
@@ -554,10 +569,11 @@ async fn run_socket(client_id: ClientId, durable: bool, binary: bool, mut socket
                         SocketMessage::Stop => break,
                         SocketMessage::ResetConnection(new) => { socket = new; continue },
                         SocketMessage::OutgoingMessage(message) => {
-                            match ClientResponse::try_from(message){
-                                Ok(message) => message,
-                                Err(err) => { error!("Send Encode Error: {err}"); continue },
-                            }
+                            message.message
+                            // match ClientResponse::try_from(message){
+                            //     Ok(message) => message,
+                            //     Err(err) => { error!("Send Encode Error: {err}"); continue },
+                            // }
                         },
                         SocketMessage::PreparedMessage(message) => {
                             message

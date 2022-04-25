@@ -4,7 +4,7 @@ pub enum Error {
 //     IO(std::io::Error),
 //     Bincode(Box<bincode::ErrorKind>),
 //     // WriteFileFail(usize, usize),
-//     SendError,
+    SendError,
     ReadPastEnd,
 //     WebSocket(hyper_tungstenite::tungstenite::Error),
 //     JSON(serde_json::Error),

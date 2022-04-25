@@ -571,7 +571,7 @@ mod test {
                 }
             }
         }
-        assert_eq!(retries, 3);
+        assert_eq!(retries, 2);
         assert_eq!(drops, 1);
         
         client.stop().await.unwrap()

@@ -9,9 +9,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
 use crate::config::QueueConfiguration;
+use crate::request::NotificationName;
 use crate::session::{SessionClient, NotificationMask, QueueStatusResponse};
 use super::entry::{Entry, Firmness, ClientId, SequenceNo};
-use super::{ClientMessage, ClientMessageType};
+use super::ClientMessage;
 use super::shard::Shard;
 
 #[derive(Debug)]
@@ -352,11 +353,7 @@ impl PriorityQueueInternal {
 
         // If the sender wants early confirmation send them that
         if notice.notices.contains(NotificationMask::Ready) {
-            self.session.send_client(ClientMessage {
-                client: notice.client,
-                label: notice.label,
-                notice: ClientMessageType::Ready
-            }).await?;
+            self.session.notify_client(notice.client, notice.label, NotificationName::Ready).await;
         }
 
         // Clean up shards we can't write to
@@ -495,28 +492,26 @@ impl PriorityQueueInternal {
         debug!("Direct pop {}", notice.label);
 
         // Try to send the client the message
-        let sent = self.session.send_client(ClientMessage {
+        let sent = self.session.message_client(ClientMessage {
             client: pop.client,
-            label: pop.label,
-            notice: ClientMessageType::SendEntry(entry, true),
-        }).await?;
+            message: crate::response::ClientResponse::Message(crate::response::ClientDelivery {
+                label: pop.label,
+                shard: entry.header.shard,
+                sequence: entry.header.sequence.0,
+                body: (*entry.body).clone(),
+                finished: true,
+            }),
+        }).await;
 
-        // If sending it failed, send it back
-        if let Some(message) = sent {
-            if let ClientMessageType::SendEntry(entry, _) = message.notice {
-                return Ok(Some(entry))
-            }
+        // If sending it failed, return it for another attempt
+        if sent.is_err() {
+            return Ok(Some(entry))
         } 
 
         // It was sent OK, notify client
         if notice.notices.contains(NotificationMask::Finish) || notice.notices.contains(NotificationMask::Ready) {
             debug!("Direct pop {} notification", notice.label);
-            let _ = self.session.send_client(ClientMessage{
-                client: notice.client,
-                label: notice.label,
-                notice: ClientMessageType::Finish,
-            }).await;
-
+            self.session.notify_client(notice.client, notice.label, NotificationName::Finish).await;
         }
 
         return Ok(None)
@@ -555,11 +550,7 @@ impl PriorityQueueInternal {
     }
 
     async fn failed_fetch(&mut self, client: ClientId, label: u64) {
-        let _ = self.session.send_client(ClientMessage{
-            client,
-            label,
-            notice: ClientMessageType::NoEntry
-        }).await;
+        let _ = self.session.message_client(ClientMessage::no_entry(client, label)).await;
     }
 
     async fn cleanup(&self) -> anyhow::Result<()> {

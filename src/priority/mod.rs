@@ -2,21 +2,8 @@ pub mod broker;
 pub mod shard;
 pub mod entry;
 
-// #[derive(Debug)]
-// pub enum ClientMessageType {
-//     Ready,
-//     Write,
-//     Sync,
-//     Assign,
-//     Finish,
-//     Retry,
-//     Drop,
-//     SendEntry(self::entry::Entry, bool),
-//     NoEntry,
-// }
-
 use crate::request::NotificationName;
-use crate::response::{ClientResponse, ClientNotice};
+use crate::response::{ClientResponse, ClientNotice, ClientNoMessage};
 
 use self::entry::ClientId;
 
@@ -31,6 +18,15 @@ impl ClientMessage {
         Self {
             client, 
             message: ClientResponse::Notice(ClientNotice{label, notice})
+        }
+    }
+
+    pub fn no_entry(client: ClientId, label: u64) -> Self {
+        Self {
+            client, 
+            message: ClientResponse::NoMessage(ClientNoMessage{
+                label,
+            })
         }
     }
 }

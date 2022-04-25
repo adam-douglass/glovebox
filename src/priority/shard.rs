@@ -2,7 +2,6 @@ use std::collections::{HashMap, BinaryHeap};
 use std::io::{Write, Read};
 use std::ops::Add;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -14,6 +13,7 @@ use crate::data_journal::DataJournal;
 use crate::operation_journal::OperationJournal;
 use crate::priority::entry::Entry;
 use crate::request::NotificationName;
+use crate::response::ClientResponse;
 use crate::session::{SessionClient, NotificationMask};
 
 use super::ClientMessage;
@@ -369,18 +369,10 @@ impl ShardInternal {
         }
 
         if note.notices.contains(NotificationMask::Write) {
-            self.client.send_client(ClientMessage{
-                client: note.client,
-                label: note.label,
-                notice: ClientMessageType::Write
-            }).await?;
+            self.client.notify_client(note.client, note.label, NotificationName::Write).await;
         }
         if note.notices.contains(NotificationMask::Sync) {
-            self.sync_event(ClientMessage{
-                client: note.client,
-                label: note.label,
-                notice: ClientMessageType::Sync
-            }).await;
+            self.sync_event(ClientMessage::note(note.client, note.label, NotificationName::Sync)).await;
         }
         return Ok(())
     }
@@ -409,25 +401,36 @@ impl ShardInternal {
         let mut output = vec![];
         decoder.read_to_end(&mut output)?;
 
-        let entry = Entry{header, body: Arc::new(output)};
+        // let entry = Entry{header, body: Arc::new(output)};
+
+        let message = ClientMessage {
+            client: params.client,
+            message: ClientResponse::Message(crate::response::ClientDelivery{
+                label: params.label,
+                shard: header.shard,
+                sequence: header.sequence.0,
+                body: output,
+                finished: false,
+            }),
+        };
 
         match params.sync {
             Firmness::Ready => {
-                self.client.send_client(ClientMessage{ client: params.client, label: params.label, notice: ClientMessageType::SendEntry(entry, false) }).await;
+                let _ = self.client.message_client(message).await;
                 self.meta_journal.append(&change).await?;
             },
             Firmness::Write => {
                 self.meta_journal.append(&change).await?;
-                self.client.send_client(ClientMessage{ client: params.client, label: params.label, notice: ClientMessageType::SendEntry(entry, false) }).await;
+                let _ = self.client.message_client(message).await;
             },
             Firmness::Sync => {
                 self.meta_journal.append(&change).await?;
-                self.sync_event(ClientMessage{ client: params.client, label: params.label, notice: ClientMessageType::SendEntry(entry, false) }).await;
+                self.sync_event(message).await;
             },
         }
 
         if notice.notices.contains(NotificationMask::Assign) {
-            self.sync_event(ClientMessage { client: notice.client, label: notice.label, notice: ClientMessageType::Assign }).await;
+            self.sync_event(ClientMessage::note(notice.client, notice.label, NotificationName::Assign)).await;
         };
 
         return Ok(())
@@ -455,26 +458,22 @@ impl ShardInternal {
         match response {
             Some(sync) => match sync {
                 Firmness::Ready => {
-                    let _ = self.client.send_client(ClientMessage {client, label, notice: ClientMessageType::Finish}).await;
+                    let _ = self.client.notify_client(client, label, NotificationName::Finish).await;
                     self.meta_journal.append(&change).await?;
                 },
                 Firmness::Write => {
                     self.meta_journal.append(&change).await?;
-                    let _ = self.client.send_client(ClientMessage {client, label, notice: ClientMessageType::Finish}).await;
+                    let _ = self.client.notify_client(client, label, NotificationName::Finish).await;
                 },
                 Firmness::Sync => {
                     self.meta_journal.append(&change).await?;
-                    self.sync_event(ClientMessage {client, label, notice: ClientMessageType::Finish}).await;
+                    let _ = self.client.notify_client(client, label, NotificationName::Finish).await;
                 },
             },
             None => self.meta_journal.append(&change).await?,
         }
         if note.notices.contains(NotificationMask::Finish) {
-            self.sync_event(ClientMessage {
-                client: note.client,
-                label: note.label,
-                notice: ClientMessageType::Finish
-            }).await;
+            self.sync_event(ClientMessage::note(note.client, note.label, NotificationName::Finish)).await;
         };
         if self.is_exhausted() {
             let _ = self.queue_connection.send(QueueCommand::ShardFinished(self.id)).await;
@@ -498,26 +497,35 @@ impl ShardInternal {
         let mut output = vec![];
         decoder.read_to_end(&mut output)?;
 
-        let entry = Entry{header, body: Arc::new(output)};
+        let message = ClientMessage{ 
+            client: pop.client, 
+            message: ClientResponse::Message(crate::response::ClientDelivery{
+                label: pop.label, 
+                shard: header.shard,
+                sequence: header.sequence.0,
+                body: output,
+                finished: true, 
+            }),
+        };
 
         match pop.sync {
             Firmness::Ready => {
-                self.client.send_client(ClientMessage{ client: pop.client, label: pop.label, notice: ClientMessageType::SendEntry(entry, true) }).await?;
+                self.client.message_client(message).await?;
                 self.meta_journal.append(&change).await?;
             },
             Firmness::Write => {
                 self.meta_journal.append(&change).await?;
-                self.client.send_client(ClientMessage{ client: pop.client, label: pop.label, notice: ClientMessageType::SendEntry(entry, true) }).await?;
+                self.client.message_client(message).await?;
             },
             Firmness::Sync => {
                 self.meta_journal.append(&change).await?;
-                self.sync_event(ClientMessage{ client: pop.client, label: pop.label, notice: ClientMessageType::SendEntry(entry, true) }).await;
+                self.sync_event(message).await;
             }
         }
 
         if notice.notices.contains(NotificationMask::Finish) {
             debug!("Pop finish notice for {} {}", notice.client, notice.label);
-            self.sync_event(ClientMessage { client: notice.client, label: notice.label, notice: ClientMessageType::Finish }).await;
+            self.sync_event(ClientMessage::note(notice.client, notice.label, NotificationName::Finish)).await;
         } else {
             debug!("Pop finish no notice");
         }
@@ -616,7 +624,7 @@ impl ShardInternal {
     async fn cycle_sync(&mut self) {
         loop {
             match self.syncing_messages.pop() {
-                Some(message) => {let _ = self.client.send_client(message).await;},
+                Some(message) => {let _ = self.client.message_client(message).await;},
                 None => break,
             }
         }
@@ -652,15 +660,15 @@ impl ShardInternal {
         });
     }
 
-    async fn sync_events(&mut self, mut events: Vec<ClientMessage>) {
-        let last = events.pop();
-        for item in events {
-            self.pending_messages.push(item);
-        }
-        if let Some(last) = last {
-            self.sync_event(last).await;
-        }
-    }
+    // async fn sync_events(&mut self, mut events: Vec<ClientMessage>) {
+    //     let last = events.pop();
+    //     for item in events {
+    //         self.pending_messages.push(item);
+    //     }
+    //     if let Some(last) = last {
+    //         self.sync_event(last).await;
+    //     }
+    // }
 
     async fn sync_event(&mut self, event: ClientMessage) {
         self.pending_messages.push(event);
@@ -679,7 +687,7 @@ impl ShardInternal {
             if self.pending_messages.len() > 0 {
                 let _ = self.meta_journal.sync().await;
                 for message in self.pending_messages {
-                    let _ = self.client.send_client(message).await;
+                    let _ = self.client.message_client(message).await;
                 }
             }
             
